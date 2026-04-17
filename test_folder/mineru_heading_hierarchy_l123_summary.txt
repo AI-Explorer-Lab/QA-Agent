@@ -1,0 +1,10 @@
+High-confidence hierarchy recovery summary (L1/L2/L3)
+source=docs\json_docs\MinerU_上海芯导电子科技股份有限公司财报_2025__20260411100646.json
+total_title_blocks=915
+noise_filtered=12
+excluded_arabic_enum_plain=328
+other_filtered=69
+total_candidates_after_filter=506
+high_conf_candidates=506
+L1=8, L2=98, L3=400
+rule=type:title + regex(L1/L2-cn/L3-paren) + bbox layout; arabic plain enum excluded

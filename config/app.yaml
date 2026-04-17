@@ -1,0 +1,106 @@
+api_keys:
+  openai_api_key: ""
+  deepseek_api_key: ""
+  qwen_api_key: ""
+  langchain_api_key: ""
+  zhipuai_api_key: ""
+  anthropic_api_key: ""
+
+mineru:
+  api_key: ""
+
+llm:
+  # Current provider + model selector.
+  # Format: <provider>-<model_key>
+  # Example: anyrouter-gpt-5.3-codex
+  current_model: "anyrouter-gpt-5.3-codex"
+
+  # Backward-compatible fallback provider.
+  provider: "anyrouter"
+
+  providers:
+    anyrouter:
+      base_url: "https://anyrouter.top/v1"
+      anthropic_base_url: "https://anyrouter.top/v1"
+      api_key_env: "OPENAI_API_KEY"
+      use_responses_api: true
+      http_proxy: "http://127.0.0.1:7897"
+      https_proxy: "http://127.0.0.1:7897"
+      no_proxy: "127.0.0.1,localhost"
+      models:
+        gpt-5.3-codex:
+          model: "gpt-5.3-codex"
+          use_responses_api: true
+        gpt-5-codex:
+          model: "gpt-5-codex"
+          use_responses_api: true
+
+    deepseek:
+      base_url: "https://api.deepseek.com/v1"
+      api_key_env: "DEEPSEEK_API_KEY"
+      use_responses_api: false
+      models:
+        deepseek-chat:
+          model: "deepseek-chat"
+        deepseek-reasoner:
+          model: "deepseek-reasoner"
+
+    openai:
+      base_url: "https://api.openai.com/v1"
+      api_key_env: "OPENAI_API_KEY"
+      use_responses_api: true
+      models:
+        gpt-5.3-codex:
+          model: "gpt-5.3-codex"
+        gpt-5-codex:
+          model: "gpt-5-codex"
+
+    zhipu:
+      base_url: "https://open.bigmodel.cn/api/paas/v4/"
+      api_key_env: "ZHIPUAI_API_KEY"
+      models:
+        glm-4.7:
+          model: "glm-4.7"
+
+  # Backward-compatible fallback fields.
+  model: "gpt-5.3-codex"
+  base_url: "https://anyrouter.top/v1"
+  anthropic_base_url: "https://anyrouter.top/v1"
+
+vector:
+  backend: "pgvector"
+  pgvector_database_url: "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/chat_llm"
+  pgvector_embedding_dim: 1024
+
+rag:
+  expand_query_num: 3
+  retrieved_answers: 5
+
+react_guardrails:
+  clarify_enabled: true
+  clarify_rag_only: true
+  clarify_max_turns: 1
+  evidence_min_docs: 2
+  evidence_min_top_similarity: 0.45
+  evidence_min_avg_similarity: 0.30
+  evidence_min_overall_score: 0.30
+  evidence_retry_limit: 2
+  refuse_on_low_evidence: true
+
+retrieval:
+  hybrid_dense_pool_factor: 4
+  hybrid_sparse_pool_factor: 6
+  sparse_algorithm: "bm25"
+  hybrid_sparse_scan_limit: 3000
+  hybrid_sparse_min_score: 0.05
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  bm25_min_score: 0.05
+  hybrid_table_quota: 2
+  hybrid_table_score_floor: 0.25
+
+chunking:
+  chunk_size_tokens: 1024
+  chunk_overlap_tokens: 200
+  max_chunk_size: 7000
+  heading_max_level: 2

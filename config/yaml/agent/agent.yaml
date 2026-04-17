@@ -1,0 +1,57 @@
+﻿agent:
+  orchestration: react_with_skills
+  max_iterations: 6
+  skill_trace_enabled: true
+  default_skill: fact_lookup
+
+skills:
+  enabled:
+    - fact_lookup
+    - table_qa
+    - citation_locate
+    - summarization
+    - report_generation
+    - multi_doc_compare
+  clarify_before_skill: true
+  fallback_skill: fact_lookup
+
+pdf:
+  parser: mineru
+  max_pages_per_task: 200
+
+chunking:
+  chunk_size_tokens: 1024
+  chunk_overlap_tokens: 200
+  max_chunk_size: 7000
+  heading_max_level: 3
+
+retrieval:
+  strategy: hybrid
+  top_k: 5
+  expand_query_num: 3
+  max_concurrency: 6
+  query_timeout_seconds: 20
+  table_evidence_quota: 2
+
+reranker:
+  dense_weight: 0.5
+  bm25_weight: 0.35
+  metadata_boost_weight: 0.1
+  table_boost_weight: 0.05
+  top_n_factor: 4
+  near_duplicate_threshold: 0.9
+
+cache:
+  enabled: true
+  ttl_seconds: 3600
+  max_items: 5000
+  embedding_cache_enabled: true
+  retrieval_cache_enabled: true
+  document_parse_cache_enabled: true
+
+guardrails:
+  evidence_min_docs: 2
+  evidence_min_top_score: 0.45
+  evidence_min_avg_score: 0.3
+  retry_limit: 2
+  refuse_on_low_evidence: true

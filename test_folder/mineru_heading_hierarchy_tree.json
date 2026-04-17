@@ -1,0 +1,1515 @@
+[
+  {
+    "node_id": "root_front_matter",
+    "level": "ROOT",
+    "text": "front_matter",
+    "page_idx": -1,
+    "block_index": -1,
+    "confidence": 1.0,
+    "reasons": [
+      "synthetic_root"
+    ],
+    "children": [
+      {
+        "node_id": "h_1",
+        "level": "L2",
+        "text": "九、前瞻性陈述的风险声明",
+        "page_idx": 2,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_2",
+        "level": "L2",
+        "text": "十、是否存在被控股股东及其他关联方非经营性占用资金情况",
+        "page_idx": 2,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_3",
+        "level": "L2",
+        "text": "十一、 是否存在违反规定决策程序对外提供担保的情况",
+        "page_idx": 2,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_4",
+        "level": "L2",
+        "text": "十二、 是否存在半数以上董事无法保证公司所披露年度报告的真实性、准确性和完整性否",
+        "page_idx": 2,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_5",
+        "level": "L2",
+        "text": "十三、 其他",
+        "page_idx": 2,
+        "block_index": 10,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_6",
+    "level": "L1",
+    "text": "第一节释义",
+    "page_idx": 4,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_7",
+        "level": "L2",
+        "text": "一、 释义",
+        "page_idx": 4,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_8",
+    "level": "L1",
+    "text": "第二节公司简介和主要财务指标",
+    "page_idx": 6,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_9",
+        "level": "L2",
+        "text": "一、公司基本情况",
+        "page_idx": 6,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_10",
+        "level": "L2",
+        "text": "二、联系人和联系方式",
+        "page_idx": 6,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_11",
+        "level": "L2",
+        "text": "三、信息披露及备置地点",
+        "page_idx": 6,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_12",
+        "level": "L2",
+        "text": "四、公司股票/存托凭证简况",
+        "page_idx": 6,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_13",
+        "level": "L2",
+        "text": "五、其他相关资料",
+        "page_idx": 6,
+        "block_index": 15,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_14",
+        "level": "L2",
+        "text": "六、近三年主要会计数据和财务指标",
+        "page_idx": 7,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_15",
+        "level": "L2",
+        "text": "七、境内外会计准则下会计数据差异",
+        "page_idx": 8,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_16",
+        "level": "L2",
+        "text": "八、2025 年分季度主要财务数据",
+        "page_idx": 8,
+        "block_index": 18,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_17",
+        "level": "L2",
+        "text": "九、非经常性损益项目和金额",
+        "page_idx": 9,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_18",
+        "level": "L2",
+        "text": "十、存在股权激励、员工持股计划的公司可选择披露扣除股份支付影响后的净利润",
+        "page_idx": 10,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_19",
+        "level": "L2",
+        "text": "十一、非企业会计准则财务指标情况",
+        "page_idx": 10,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_20",
+        "level": "L2",
+        "text": "十二、采用公允价值计量的项目",
+        "page_idx": 10,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_21",
+        "level": "L2",
+        "text": "十三、因国家秘密、商业秘密等原因的信息暂缓、豁免情况说明",
+        "page_idx": 10,
+        "block_index": 15,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_22",
+    "level": "L1",
+    "text": "第三节管理层讨论与分析",
+    "page_idx": 11,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_23",
+        "level": "L2",
+        "text": "一、报告期内公司所从事的主要业务、经营模式、行业情况说明",
+        "page_idx": 11,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_24",
+        "level": "L2",
+        "text": "二、经营情况讨论与分析",
+        "page_idx": 16,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_25",
+        "level": "L2",
+        "text": "三、报告期内核心竞争力分析",
+        "page_idx": 18,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_26",
+        "level": "L2",
+        "text": "四、风险因素",
+        "page_idx": 28,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_27",
+        "level": "L2",
+        "text": "五、报告期内主要经营情况",
+        "page_idx": 32,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_28",
+        "level": "L2",
+        "text": "六、公司关于公司未来发展的讨论与分析",
+        "page_idx": 42,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_29",
+    "level": "L1",
+    "text": "第四节公司治理、环境和社会",
+    "page_idx": 45,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_30",
+        "level": "L2",
+        "text": "一、公司治理相关情况说明",
+        "page_idx": 45,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_31",
+        "level": "L2",
+        "text": "二、公司就其与控股股东在业务、人员、资产、机构、财务等方面存在的不能保证独立性、不能保持自主经营能力的情况说明",
+        "page_idx": 45,
+        "block_index": 10,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_32",
+        "level": "L2",
+        "text": "三、表决权差异安排在报告期内的实施和变化情况",
+        "page_idx": 45,
+        "block_index": 14,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_33",
+        "level": "L2",
+        "text": "四、红筹架构公司治理情况",
+        "page_idx": 45,
+        "block_index": 16,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_34",
+        "level": "L2",
+        "text": "五、董事和高级管理人员的情况",
+        "page_idx": 46,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_35",
+        "level": "L2",
+        "text": "六、董事履行职责情况",
+        "page_idx": 50,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_36",
+        "level": "L2",
+        "text": "七、董事会下设专门委员会情况",
+        "page_idx": 50,
+        "block_index": 14,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_37",
+        "level": "L2",
+        "text": "八、审计委员会发现公司存在风险的说明",
+        "page_idx": 52,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_38",
+        "level": "L2",
+        "text": "九、报告期末母公司和主要子公司的员工情况",
+        "page_idx": 52,
+        "block_index": 10,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_39",
+        "level": "L2",
+        "text": "十、利润分配或资本公积金转增预案",
+        "page_idx": 53,
+        "block_index": 15,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_40",
+        "level": "L2",
+        "text": "十一、公司股权激励计划、员工持股计划或其他员工激励措施的情况及其影响",
+        "page_idx": 55,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_41",
+        "level": "L2",
+        "text": "十二、报告期内的内部控制制度建设及实施情况",
+        "page_idx": 56,
+        "block_index": 22,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_42",
+        "level": "L2",
+        "text": "十三、报告期内对子公司的管理控制情况",
+        "page_idx": 57,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_43",
+        "level": "L2",
+        "text": "十四、内部控制审计报告的相关情况说明",
+        "page_idx": 57,
+        "block_index": 10,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_44",
+        "level": "L2",
+        "text": "十五、上市公司治理专项行动自查问题整改情况",
+        "page_idx": 57,
+        "block_index": 17,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_45",
+        "level": "L2",
+        "text": "十六、董事会有关 ESG 情况的声明",
+        "page_idx": 57,
+        "block_index": 19,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_46",
+        "level": "L2",
+        "text": "十七、ESG 整体工作成果",
+        "page_idx": 58,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_47",
+        "level": "L2",
+        "text": "十八、纳入环境信息依法披露企业名单的上市公司及其主要子公司的环境信息情况",
+        "page_idx": 58,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_48",
+        "level": "L2",
+        "text": "十九、社会责任工作情况",
+        "page_idx": 58,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_49",
+        "level": "L2",
+        "text": "二十、其他公司治理情况",
+        "page_idx": 60,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_50",
+        "level": "L2",
+        "text": "二十一、其他",
+        "page_idx": 61,
+        "block_index": 17,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_51",
+    "level": "L1",
+    "text": "第五节重要事项",
+    "page_idx": 62,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_52",
+        "level": "L2",
+        "text": "一、承诺事项履行情况",
+        "page_idx": 62,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_53",
+        "level": "L2",
+        "text": "二、报告期内控股股东及其他关联方非经营性占用资金情况",
+        "page_idx": 73,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_54",
+        "level": "L2",
+        "text": "三、违规担保情况",
+        "page_idx": 73,
+        "block_index": 13,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_55",
+        "level": "L2",
+        "text": "四、公司董事会对会计师事务所“非标准意见审计报告”的说明",
+        "page_idx": 73,
+        "block_index": 15,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_56",
+        "level": "L2",
+        "text": "五、公司对会计政策、会计估计变更或重大会计差错更正原因和影响的分析说明",
+        "page_idx": 73,
+        "block_index": 17,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_57",
+        "level": "L2",
+        "text": "六、聘任、解聘会计师事务所情况",
+        "page_idx": 73,
+        "block_index": 26,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_58",
+        "level": "L2",
+        "text": "七、面临退市风险的情况",
+        "page_idx": 74,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_59",
+        "level": "L2",
+        "text": "八、破产重整相关事项",
+        "page_idx": 74,
+        "block_index": 18,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_60",
+        "level": "L2",
+        "text": "九、重大诉讼、仲裁事项",
+        "page_idx": 74,
+        "block_index": 20,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_61",
+        "level": "L2",
+        "text": "十、上市公司及其董事、高级管理人员、控股股东、实际控制人涉嫌违法违规、受到处罚及整改情况",
+        "page_idx": 74,
+        "block_index": 22,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_62",
+        "level": "L2",
+        "text": "十一、报告期内公司及其控股股东、实际控制人诚信状况的说明",
+        "page_idx": 75,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_63",
+        "level": "L2",
+        "text": "十二、重大关联交易",
+        "page_idx": 75,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_64",
+        "level": "L2",
+        "text": "十三、重大合同及其履行情况",
+        "page_idx": 76,
+        "block_index": 10,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_65",
+        "level": "L2",
+        "text": "十四、募集资金使用进展说明",
+        "page_idx": 82,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_66",
+        "level": "L2",
+        "text": "十五、其他对投资者作出价值判断和投资决策有重大影响的重大事项的说明",
+        "page_idx": 86,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_67",
+    "level": "L1",
+    "text": "第六节股份变动及股东情况",
+    "page_idx": 87,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_68",
+        "level": "L2",
+        "text": "一、股本变动情况",
+        "page_idx": 87,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_69",
+        "level": "L2",
+        "text": "二、证券发行与上市情况",
+        "page_idx": 88,
+        "block_index": 14,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_70",
+        "level": "L2",
+        "text": "三、股东和实际控制人情况",
+        "page_idx": 88,
+        "block_index": 21,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_71",
+        "level": "L2",
+        "text": "四、控股股东及实际控制人情况",
+        "page_idx": 91,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_72",
+        "level": "L2",
+        "text": "五、公司控股股东或第一大股东及其一致行动人累计质押股份数量占其所持公司股份数量比例达到80 \\%以上",
+        "page_idx": 93,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_73",
+        "level": "L2",
+        "text": "六、其他持股在百分之十以上的法人股东",
+        "page_idx": 93,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_74",
+        "level": "L2",
+        "text": "七、股份/存托凭证限制减持情况说明",
+        "page_idx": 93,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_75",
+        "level": "L2",
+        "text": "八、股份回购在报告期的具体实施情况",
+        "page_idx": 93,
+        "block_index": 13,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_76",
+        "level": "L2",
+        "text": "九、优先股相关情况",
+        "page_idx": 93,
+        "block_index": 15,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_77",
+    "level": "L1",
+    "text": "第七节债券相关情况",
+    "page_idx": 94,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_78",
+        "level": "L2",
+        "text": "一、公司债券（含企业债券）和非金融企业债务融资工具",
+        "page_idx": 94,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_79",
+        "level": "L2",
+        "text": "二、可转换公司债券情况",
+        "page_idx": 94,
+        "block_index": 5,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "node_id": "h_80",
+    "level": "L1",
+    "text": "第八节财务报告",
+    "page_idx": 95,
+    "block_index": 2,
+    "confidence": 0.98,
+    "reasons": [
+      "regex:L1_第X节",
+      "layout:L1_centered",
+      "layout:L1_relatively_tall",
+      "type:title"
+    ],
+    "children": [
+      {
+        "node_id": "h_81",
+        "level": "L2",
+        "text": "一、审计报告",
+        "page_idx": 95,
+        "block_index": 3,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_82",
+        "level": "L2",
+        "text": "一、审计意见",
+        "page_idx": 95,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_83",
+        "level": "L2",
+        "text": "二、形成审计意见的基础",
+        "page_idx": 95,
+        "block_index": 11,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_84",
+        "level": "L2",
+        "text": "三、关键审计事项",
+        "page_idx": 95,
+        "block_index": 13,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_85",
+        "level": "L2",
+        "text": "四、其他信息",
+        "page_idx": 97,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_86",
+        "level": "L2",
+        "text": "五、管理层和治理层对财务报表的责任",
+        "page_idx": 97,
+        "block_index": 9,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_87",
+        "level": "L2",
+        "text": "六、注册会计师对财务报表审计的责任",
+        "page_idx": 97,
+        "block_index": 13,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_88",
+        "level": "L2",
+        "text": "二、财务报表",
+        "page_idx": 100,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_89",
+        "level": "L2",
+        "text": "三、公司基本情况",
+        "page_idx": 117,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_90",
+        "level": "L2",
+        "text": "四、财务报表的编制基础",
+        "page_idx": 119,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_91",
+        "level": "L2",
+        "text": "五、重要会计政策及会计估计",
+        "page_idx": 119,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_92",
+        "level": "L2",
+        "text": "六、税项",
+        "page_idx": 143,
+        "block_index": 14,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_93",
+        "level": "L2",
+        "text": "七、合并财务报表项目注释",
+        "page_idx": 144,
+        "block_index": 12,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_94",
+        "level": "L2",
+        "text": "八、研发支出",
+        "page_idx": 189,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_95",
+        "level": "L2",
+        "text": "九、合并范围的变更",
+        "page_idx": 189,
+        "block_index": 21,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_96",
+        "level": "L2",
+        "text": "十、在其他主体中的权益",
+        "page_idx": 190,
+        "block_index": 16,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_97",
+        "level": "L2",
+        "text": "十一、 政府补助",
+        "page_idx": 192,
+        "block_index": 20,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_98",
+        "level": "L2",
+        "text": "十二、 与金融工具相关的风险",
+        "page_idx": 193,
+        "block_index": 4,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_99",
+        "level": "L2",
+        "text": "十三、 公允价值的披露",
+        "page_idx": 198,
+        "block_index": 7,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_100",
+        "level": "L2",
+        "text": "十四、 关联方及关联交易",
+        "page_idx": 200,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_101",
+        "level": "L2",
+        "text": "十五、 股份支付",
+        "page_idx": 203,
+        "block_index": 8,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_102",
+        "level": "L2",
+        "text": "十六、 承诺及或有事项",
+        "page_idx": 204,
+        "block_index": 17,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_103",
+        "level": "L2",
+        "text": "十七、 资产负债表日后事项",
+        "page_idx": 205,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_104",
+        "level": "L2",
+        "text": "十八、 其他重要事项",
+        "page_idx": 205,
+        "block_index": 13,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_105",
+        "level": "L2",
+        "text": "十九、 母公司财务报表主要项目注释",
+        "page_idx": 207,
+        "block_index": 2,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      },
+      {
+        "node_id": "h_106",
+        "level": "L2",
+        "text": "二十、补充资料",
+        "page_idx": 216,
+        "block_index": 14,
+        "confidence": 0.93,
+        "reasons": [
+          "regex:L2_chinese_enum",
+          "layout:L2_left_aligned",
+          "type:title"
+        ],
+        "children": []
+      }
+    ]
+  }
+]
