@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ router = APIRouter()
 
 
 class DocumentIndexRequest(BaseModel):
+    doc_source: str = ''
     pdf_path: str
     force_rebuild: bool = False
     collection_name: str = "default"
@@ -20,4 +21,6 @@ async def index_documents(request: DocumentIndexRequest):
         pdf_path=request.pdf_path,
         force_rebuild=request.force_rebuild,
         collection_name=request.collection_name,
+        doc_source=request.doc_source or None,
     )
+

@@ -147,6 +147,104 @@ class PgvectorRepository:
             self.revision += 1
         return count
 
+    def get_latest_document_by_source(self, collection_name: str, doc_source: str) -> Dict[str, Any] | None:
+        collection = _clean_text(collection_name)
+        source = _clean_text(doc_source)
+        if not collection or not source:
+            return None
+
+        if self.backend == "pgvector":
+            engine = self._engine_instance()
+            sql = text(
+                """
+                SELECT
+                    doc_id,
+                    collection_name,
+                    doc_source,
+                    title,
+                    doc_hash,
+                    page_count,
+                    indexed_at,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM pdf_documents
+                WHERE collection_name = :collection_name
+                  AND doc_source = :doc_source
+                ORDER BY indexed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            with engine.begin() as connection:
+                record = connection.execute(
+                    sql,
+                    {"collection_name": collection, "doc_source": source},
+                ).mappings().first()
+            if record is None:
+                return None
+            payload = dict(record)
+            metadata = payload.get("metadata_json") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    metadata = {}
+            payload["metadata_json"] = metadata
+            return payload
+
+        # local_dev fallback: best-effort scan in-memory chunks
+        for row in reversed(self._local_chunks):
+            if str(row.get("collection_name") or "") != collection:
+                continue
+            if str(row.get("doc_source") or "") != source:
+                continue
+            return {
+                "doc_id": row.get("doc_id") or "",
+                "collection_name": collection,
+                "doc_source": source,
+                "title": row.get("title") or "",
+                "doc_hash": row.get("doc_hash") or "",
+                "page_count": int(row.get("page_count") or 0),
+                "indexed_at": "",
+                "created_at": "",
+                "updated_at": "",
+                "metadata_json": row.get("metadata_json") or {},
+            }
+        return None
+
+    def delete_documents_by_source(self, collection_name: str, doc_source: str) -> int:
+        collection = _clean_text(collection_name)
+        source = _clean_text(doc_source)
+        if not collection or not source:
+            return 0
+
+        if self.backend == "pgvector":
+            engine = self._engine_instance()
+            sql = text(
+                "DELETE FROM pdf_documents WHERE collection_name = :collection_name AND doc_source = :doc_source"
+            )
+            with engine.begin() as connection:
+                result = connection.execute(
+                    sql,
+                    {"collection_name": collection, "doc_source": source},
+                )
+                return int(getattr(result, "rowcount", 0) or 0)
+
+        if self.backend == "local_dev":
+            before = len(self._local_chunks)
+            self._local_chunks = [
+                row
+                for row in self._local_chunks
+                if not (
+                    str(row.get("collection_name") or "") == collection
+                    and str(row.get("doc_source") or "") == source
+                )
+            ]
+            self._sparse_retriever.index_chunks(self._local_chunks)
+            return before - len(self._local_chunks)
+
+        raise RuntimeError(f"Unsupported repository backend: {self.backend}")
+
     def replace_collection_chunks(self, collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
         collection = _clean_text(collection_name) or "default"
         prepared = [self._prepare_chunk(source) for source in chunks]
@@ -641,3 +739,5 @@ class PgvectorRepository:
 
         rows.sort(key=lambda item: float(item.get("bm25_score") or 0.0), reverse=True)
         return rows[: max(1, int(top_k))]
+
+
