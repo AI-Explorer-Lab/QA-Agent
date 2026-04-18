@@ -67,7 +67,7 @@ class TrustedQAWorkflow:
         expand_query_num: int = 3,
         enable_cache: bool = True,
     ) -> Dict[str, Any]:
-        session = self.session_service.load_session(session_id)
+        session = self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
         query_type = classify_query_type(question)
         selected_skill = self.skill_registry.select_skill(query_type)
