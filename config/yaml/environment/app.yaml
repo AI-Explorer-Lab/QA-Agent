@@ -1,9 +1,0 @@
-﻿app:
-  name: Enterprise-Unstructured-Document-Trusted-Question-Answering-Agent
-  env: dev
-  timezone: Asia/Singapore
-
-llm:
-  current_model: anyrouter-gpt-5.3-codex
-  temperature: 0.2
-  max_tokens: 2048

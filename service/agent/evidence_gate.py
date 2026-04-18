@@ -119,7 +119,8 @@ class EvidenceGate:
                 "confidence": _confidence(rows),
             }
 
-        if len(rows) < self.evidence_min_docs:
+        coverage_sensitive_types = {"summarization", "report_generation", "multi_doc_compare"}
+        if query_type in coverage_sensitive_types and len(rows) < self.evidence_min_docs:
             if retry_count < self.retry_limit:
                 return {
                     "decision": "retry",

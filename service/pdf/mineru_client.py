@@ -1,13 +1,23 @@
 ﻿from __future__ import annotations
 
 import copy
+import io
 import json
+import logging
+import math
 import os
 import re
+import shutil
+import time
+import zipfile
 from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+
+from core.config_loader import load_runtime_env
+from middlewares.operation_log import log_operation_event
 from service.pdf.document_parse_cache import DocumentParseCache
 from service.pdf.heading_recovery import detect_heading_level
 from service.pdf.pdf_loader import PdfLoaderError, collect_pdf_paths
@@ -40,12 +50,54 @@ class MinerUClient:
         cache_max_items: int = 5000,
         document_parse_cache: DocumentParseCache | None = None,
         mineru_json_root: str | Path | None = None,
+        remote_enabled: bool | None = None,
+        max_pages_per_task: int | None = None,
+        poll_interval_seconds: float = 15.0,
+        max_poll_attempts: int = 60,
     ) -> None:
         self.document_parse_cache = document_parse_cache or DocumentParseCache(
             ttl_seconds=cache_ttl_seconds,
             max_items=cache_max_items,
         )
         self.mineru_json_root = Path(mineru_json_root).resolve() if mineru_json_root else None
+        self.remote_enabled = self._resolve_remote_enabled(remote_enabled)
+        self.max_pages_per_task = self._resolve_max_pages_per_task(max_pages_per_task)
+        self.poll_interval_seconds = max(0.1, float(poll_interval_seconds))
+        self.max_poll_attempts = max(1, int(max_poll_attempts))
+
+    @staticmethod
+    def _resolve_remote_enabled(value: bool | None) -> bool:
+        if value is not None:
+            return bool(value)
+        config_value = None
+        try:
+            from utils.config_loader import get_app_config
+
+            pdf_cfg = get_app_config().get("pdf", {})
+            if isinstance(pdf_cfg, dict):
+                config_value = pdf_cfg.get("mineru_remote_enabled")
+        except Exception:
+            config_value = None
+
+        if config_value is None:
+            config_value = os.getenv("MINERU_REMOTE_ENABLED", "true")
+        return str(config_value).strip().lower() not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _resolve_max_pages_per_task(value: int | None) -> int:
+        if value is not None:
+            return max(1, int(value))
+        try:
+            from utils.config_loader import get_app_config
+
+            pdf_cfg = get_app_config().get("pdf", {})
+            if isinstance(pdf_cfg, dict):
+                configured = pdf_cfg.get("max_pages_per_task")
+                if configured:
+                    return max(1, int(configured))
+        except Exception:
+            pass
+        return 200
 
     def _cache_key(self, pdf_file: Path) -> str:
         digest = file_sha256(pdf_file)
@@ -336,9 +388,399 @@ class MinerUClient:
             raise MinerUClientError(f"Invalid MinerU JSON payload format: {json_path}")
         return payload
 
-    def _try_remote_mineru(self, pdf_file: Path) -> Optional[Dict[str, Any]]:
-        _ = pdf_file
+    @staticmethod
+    def _safe_response_text(response: requests.Response, limit: int = 700) -> str:
+        try:
+            text = response.text
+        except Exception:
+            text = ""
+        return str(text or "")[:limit]
+
+    @staticmethod
+    def _resolve_token_from_env() -> str:
+        load_runtime_env()
+        configured_env_name = os.getenv("MINERU_API_KEY_ENV", "MinerU_API_KEY").strip() or "MinerU_API_KEY"
+        candidates = [configured_env_name, "MinerU_API_KEY", "MINERU_API_KEY"]
+        for name in candidates:
+            value = os.getenv(name, "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _read_page_count(pdf_file: Path) -> int:
+        if fitz is None:
+            return 1
+        try:
+            document = fitz.open(str(pdf_file))
+            try:
+                return max(1, int(document.page_count))
+            finally:
+                document.close()
+        except Exception:
+            return 1
+
+    @staticmethod
+    def _extract_mineru_payload_from_zip(zip_file: zipfile.ZipFile) -> Optional[Dict[str, Any]]:
+        json_files = [name for name in zip_file.namelist() if name.lower().endswith(".json")]
+        for file_name in json_files:
+            try:
+                payload = json.loads(zip_file.read(file_name).decode("utf-8"))
+            except Exception as exc:
+                log_operation_event(
+                    "index.ocr.remote.zip_json_skipped",
+                    status="warning",
+                    level=logging.WARNING,
+                    zip_member=file_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                continue
+
+            if isinstance(payload, dict) and "pdf_info" in payload:
+                return payload
         return None
+
+    def _build_markdown_payload(self, pdf_file: Path, markdown_text: str) -> Dict[str, Any]:
+        paragraphs = self._split_text_into_paragraphs(markdown_text)
+        para_blocks = [
+            self._build_text_para_block(text=paragraph, block_index=index, bbox=[0.0, 0.0, 0.0, 0.0])
+            for index, paragraph in enumerate(paragraphs)
+            if paragraph
+        ]
+        if not para_blocks:
+            return self._minimal_fallback_payload(pdf_file)
+        return {
+            "source": "mineru_remote_markdown",
+            "pdf_path": str(pdf_file),
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [0.0, 0.0],
+                    "para_blocks": para_blocks,
+                }
+            ],
+        }
+
+    def _extract_remote_payload_from_zip_bytes(self, pdf_file: Path, content: bytes) -> Dict[str, Any]:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            payload = self._extract_mineru_payload_from_zip(archive)
+            if payload is not None:
+                payload = copy.deepcopy(payload)
+                payload["source"] = "mineru_remote"
+                return payload
+
+            markdown_files = [name for name in archive.namelist() if name.lower().endswith(".md")]
+            if markdown_files:
+                markdown_parts: List[str] = []
+                for name in markdown_files:
+                    try:
+                        markdown_parts.append(archive.read(name).decode("utf-8"))
+                    except Exception:
+                        continue
+                if markdown_parts:
+                    return self._build_markdown_payload(pdf_file, "\n\n".join(markdown_parts))
+
+        raise MinerUClientError("MinerU result zip does not contain a usable JSON or Markdown payload.")
+
+    def _request_remote_upload_url(self, headers: Dict[str, str], file_name: str) -> Tuple[str, str]:
+        request_body = {
+            "files": [{"name": file_name}],
+            "model_version": "vlm",
+            "is_ocr": True,
+        }
+        log_operation_event(
+            "index.ocr.remote.upload_url",
+            status="started",
+            file_name=file_name,
+            model_version=request_body["model_version"],
+            is_ocr=request_body["is_ocr"],
+        )
+        response = requests.post(
+            "https://mineru.net/api/v4/file-urls/batch",
+            headers=headers,
+            json=request_body,
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise MinerUClientError(
+                f"MinerU upload URL request failed: http={response.status_code}, body={self._safe_response_text(response)}"
+            )
+
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise MinerUClientError(f"MinerU upload URL API error: {payload.get('msg') or payload.get('code')}")
+
+        data = payload.get("data") or {}
+        batch_id = str(data.get("batch_id") or "").strip()
+        file_urls = data.get("file_urls") or []
+        file_url = str(file_urls[0] if file_urls else "").strip()
+        if not batch_id or not file_url:
+            raise MinerUClientError("MinerU upload URL API returned empty batch_id or file_url.")
+
+        log_operation_event(
+            "index.ocr.remote.upload_url",
+            status="completed",
+            file_name=file_name,
+            batch_id=batch_id,
+        )
+        return batch_id, file_url
+
+    def _upload_remote_pdf(self, file_path: Path, file_url: str, batch_id: str, split_index: int, split_count: int) -> None:
+        log_operation_event(
+            "index.ocr.remote.upload",
+            status="started",
+            split_index=split_index + 1,
+            split_count=split_count,
+            file_name=file_path.name,
+            size_bytes=file_path.stat().st_size,
+            batch_id=batch_id,
+        )
+        with file_path.open("rb") as file:
+            response = requests.put(file_url, data=file, timeout=120)
+        if response.status_code != 200:
+            raise MinerUClientError(
+                f"MinerU upload failed: http={response.status_code}, body={self._safe_response_text(response)}"
+            )
+        log_operation_event(
+            "index.ocr.remote.upload",
+            status="completed",
+            split_index=split_index + 1,
+            split_count=split_count,
+            file_name=file_path.name,
+            batch_id=batch_id,
+        )
+
+    def _poll_remote_payload(
+        self,
+        headers: Dict[str, str],
+        batch_id: str,
+        pdf_file: Path,
+        split_index: int,
+        split_count: int,
+    ) -> Dict[str, Any]:
+        result_url = f"https://mineru.net/api/v4/extract-results/batch/{batch_id}"
+        for attempt in range(1, self.max_poll_attempts + 1):
+            response = requests.get(result_url, headers=headers, timeout=30)
+            if response.status_code != 200:
+                log_operation_event(
+                    "index.ocr.remote.poll",
+                    status="waiting",
+                    level=logging.WARNING,
+                    split_index=split_index + 1,
+                    split_count=split_count,
+                    attempt=attempt,
+                    max_attempts=self.max_poll_attempts,
+                    batch_id=batch_id,
+                    http_status=response.status_code,
+                    response_text=self._safe_response_text(response, limit=300),
+                )
+                time.sleep(self.poll_interval_seconds)
+                continue
+
+            result_payload = response.json()
+            if result_payload.get("code") != 0:
+                log_operation_event(
+                    "index.ocr.remote.poll",
+                    status="waiting",
+                    level=logging.WARNING,
+                    split_index=split_index + 1,
+                    split_count=split_count,
+                    attempt=attempt,
+                    max_attempts=self.max_poll_attempts,
+                    batch_id=batch_id,
+                    api_code=result_payload.get("code"),
+                    api_message=result_payload.get("msg"),
+                )
+                time.sleep(self.poll_interval_seconds)
+                continue
+
+            extract_results = (result_payload.get("data") or {}).get("extract_result") or []
+            if not extract_results:
+                log_operation_event(
+                    "index.ocr.remote.poll",
+                    status="waiting",
+                    split_index=split_index + 1,
+                    split_count=split_count,
+                    attempt=attempt,
+                    max_attempts=self.max_poll_attempts,
+                    batch_id=batch_id,
+                    state="no_extract_result",
+                )
+                time.sleep(self.poll_interval_seconds)
+                continue
+
+            extract_result = extract_results[0] or {}
+            state = str(extract_result.get("state") or "").strip().lower()
+            log_operation_event(
+                "index.ocr.remote.poll",
+                status="waiting" if state != "done" else "completed",
+                split_index=split_index + 1,
+                split_count=split_count,
+                attempt=attempt,
+                max_attempts=self.max_poll_attempts,
+                batch_id=batch_id,
+                state=state or "unknown",
+            )
+
+            if state == "done":
+                zip_url = str(extract_result.get("full_zip_url") or "").strip()
+                if not zip_url:
+                    raise MinerUClientError("MinerU extraction completed without full_zip_url.")
+                zip_response = requests.get(zip_url, timeout=120)
+                if zip_response.status_code != 200:
+                    raise MinerUClientError(
+                        f"MinerU result zip download failed: http={zip_response.status_code}, body={self._safe_response_text(zip_response)}"
+                    )
+                log_operation_event(
+                    "index.ocr.remote.download",
+                    status="completed",
+                    split_index=split_index + 1,
+                    split_count=split_count,
+                    batch_id=batch_id,
+                    zip_size_bytes=len(zip_response.content or b""),
+                )
+                return self._extract_remote_payload_from_zip_bytes(pdf_file, zip_response.content)
+
+            if state == "failed":
+                raise MinerUClientError(f"MinerU extraction failed for batch_id={batch_id}.")
+
+            time.sleep(self.poll_interval_seconds)
+
+        raise MinerUClientError(
+            f"MinerU extraction timed out after {self.max_poll_attempts} polls for batch_id={batch_id}."
+        )
+
+    def _create_split_tasks(self, pdf_file: Path, page_count: int) -> Tuple[List[Tuple[int, Path]], Optional[Path]]:
+        if fitz is None or page_count <= self.max_pages_per_task:
+            return [(0, pdf_file)], None
+
+        temp_dir = Path.cwd() / "docs" / "temp_pdf"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time())
+        split_count = math.ceil(page_count / self.max_pages_per_task)
+        split_tasks: List[Tuple[int, Path]] = []
+
+        source_doc = fitz.open(str(pdf_file))
+        try:
+            for split_index in range(split_count):
+                start_page = split_index * self.max_pages_per_task
+                end_page = min((split_index + 1) * self.max_pages_per_task, page_count)
+                split_path = temp_dir / f"{pdf_file.stem}_split_{split_index + 1}_{timestamp}.pdf"
+                sub_doc = fitz.open()
+                try:
+                    for page_number in range(start_page, end_page):
+                        sub_doc.insert_pdf(source_doc, from_page=page_number, to_page=page_number)
+                    sub_doc.save(str(split_path))
+                finally:
+                    sub_doc.close()
+                split_tasks.append((split_index, split_path))
+        finally:
+            source_doc.close()
+
+        return split_tasks, temp_dir
+
+    @staticmethod
+    def _merge_remote_payloads(pdf_file: Path, payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+        merged_pdf_info: List[Dict[str, Any]] = []
+        for payload in payloads:
+            for page in payload.get("pdf_info") or []:
+                if not isinstance(page, dict):
+                    continue
+                page_copy = copy.deepcopy(page)
+                page_copy["page_idx"] = len(merged_pdf_info)
+                merged_pdf_info.append(page_copy)
+
+        if not merged_pdf_info:
+            raise MinerUClientError("MinerU remote payload contains no pdf_info pages.")
+
+        return {
+            "source": "mineru_remote",
+            "pdf_path": str(pdf_file),
+            "remote_split_count": len(payloads),
+            "pdf_info": merged_pdf_info,
+        }
+
+    def _try_remote_mineru(self, pdf_file: Path) -> Optional[Dict[str, Any]]:
+        if not self.remote_enabled:
+            log_operation_event(
+                "index.ocr.remote",
+                status="disabled",
+                pdf_path=str(pdf_file),
+                message="MinerU remote OCR is disabled by config or environment.",
+            )
+            return None
+
+        token = self._resolve_token_from_env()
+        if not token:
+            log_operation_event(
+                "index.ocr.remote",
+                status="skipped",
+                level=logging.WARNING,
+                pdf_path=str(pdf_file),
+                reason="missing_mineru_api_key",
+            )
+            return None
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        page_count = self._read_page_count(pdf_file)
+        log_operation_event(
+            "index.ocr.source",
+            status="selected",
+            pdf_path=str(pdf_file),
+            source="mineru_remote",
+            page_count=page_count,
+            max_pages_per_task=self.max_pages_per_task,
+        )
+
+        temp_dir: Optional[Path] = None
+        try:
+            split_tasks, temp_dir = self._create_split_tasks(pdf_file, page_count)
+            split_count = len(split_tasks)
+            payloads: List[Dict[str, Any]] = []
+            log_operation_event(
+                "index.ocr.remote",
+                status="started",
+                pdf_path=str(pdf_file),
+                page_count=page_count,
+                split_count=split_count,
+            )
+
+            for split_index, split_path in split_tasks:
+                batch_id, file_url = self._request_remote_upload_url(headers, split_path.name)
+                self._upload_remote_pdf(split_path, file_url, batch_id, split_index, split_count)
+                payload = self._poll_remote_payload(headers, batch_id, pdf_file, split_index, split_count)
+                payloads.append(payload)
+
+            merged = self._merge_remote_payloads(pdf_file, payloads)
+            log_operation_event(
+                "index.ocr.remote",
+                status="completed",
+                pdf_path=str(pdf_file),
+                page_count=len(merged.get("pdf_info") or []),
+                split_count=split_count,
+            )
+            return merged
+        except Exception as exc:
+            log_operation_event(
+                "index.ocr.remote",
+                status="failed",
+                level=logging.ERROR,
+                pdf_path=str(pdf_file),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                message="MinerU remote OCR failed; local fallback will be used if available.",
+            )
+            return None
+        finally:
+            if temp_dir is not None:
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
 
     def parse_pdf_to_mineru_json(
         self,
@@ -357,14 +799,41 @@ class MinerUClient:
         if use_cache and not force_rebuild:
             cached_payload = self.document_parse_cache.get(cache_key)
             if cached_payload is not None:
+                log_operation_event(
+                    "index.ocr.cache",
+                    status="hit",
+                    pdf_path=str(pdf_file),
+                    cache_key=cache_key,
+                )
                 return copy.deepcopy(cached_payload)
+            log_operation_event(
+                "index.ocr.cache",
+                status="miss",
+                pdf_path=str(pdf_file),
+                cache_key=cache_key,
+            )
 
         resolved_json_path = self._resolve_mineru_json_path(pdf_file, mineru_json_path)
         if resolved_json_path:
+            log_operation_event(
+                "index.ocr.source",
+                status="selected",
+                pdf_path=str(pdf_file),
+                source="mineru_json_file",
+                mineru_json_path=str(resolved_json_path),
+            )
             payload = self._load_json_payload(resolved_json_path)
         else:
             payload = self._try_remote_mineru(pdf_file)
             if payload is None:
+                log_operation_event(
+                    "index.ocr.source",
+                    status="warning",
+                    level=logging.WARNING,
+                    pdf_path=str(pdf_file),
+                    source="pymupdf_fallback",
+                    message="Remote MinerU OCR is unavailable; falling back to local PyMuPDF/minimal parsing.",
+                )
                 payload = self._fallback_parse_with_pymupdf(pdf_file)
 
         if not isinstance(payload, dict) or "pdf_info" not in payload:
@@ -372,6 +841,13 @@ class MinerUClient:
 
         if use_cache:
             self.document_parse_cache.set(cache_key, copy.deepcopy(payload))
+            log_operation_event(
+                "index.ocr.cache",
+                status="stored",
+                pdf_path=str(pdf_file),
+                cache_key=cache_key,
+                parser_source=payload.get("source", "unknown"),
+            )
         return payload
 
 

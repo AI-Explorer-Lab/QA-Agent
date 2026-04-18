@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 from .parallel_query_executor import ParallelQueryExecutor
 from .two_stage_hybrid_reranker import TwoStageHybridReranker
@@ -32,6 +32,7 @@ class HybridRetriever:
         query_type: str = "fact_lookup",
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        expanded_queries: Sequence[str] | None = None,
     ) -> Dict[str, Any]:
         stage1 = await self.parallel_executor.execute(
             question=question,
@@ -40,6 +41,7 @@ class HybridRetriever:
             query_type=query_type,
             expand_query_num=expand_query_num,
             enable_cache=enable_cache,
+            expanded_queries=expanded_queries,
         )
 
         candidates = list(stage1.get("candidates") or [])
@@ -70,6 +72,7 @@ class HybridRetriever:
         query_type: str = "fact_lookup",
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        expanded_queries: Sequence[str] | None = None,
     ) -> Dict[str, Any]:
         coroutine = self.retrieve(
             question=question,
@@ -78,6 +81,7 @@ class HybridRetriever:
             query_type=query_type,
             expand_query_num=expand_query_num,
             enable_cache=enable_cache,
+            expanded_queries=expanded_queries,
         )
 
         try:

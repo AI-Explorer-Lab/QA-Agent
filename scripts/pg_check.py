@@ -37,7 +37,7 @@ def main() -> int:
     database_url = (os.getenv("PGVECTOR_DATABASE_URL") or "").strip()
     if not database_url:
         _print("[PG-CHECK] PGVECTOR_DATABASE_URL is empty.")
-        _print("[PG-CHECK] Set it in .env or config/app.yaml (vector.pgvector_database_url).")
+        _print("[PG-CHECK] Set it in .env or config/app.yaml (storage.pgvector.database_url).")
         return 2
 
     try:
@@ -58,24 +58,24 @@ def main() -> int:
                     select exists (
                       select 1
                       from information_schema.tables
-                      where table_schema='public' and table_name='rag_chunks'
+                      where table_schema='public' and table_name='pdf_chunks'
                     )
                     """
                 )
             ).scalar()
-            _print(f"[PG-CHECK] rag_chunks_exists={bool(exists)}")
+            _print(f"[PG-CHECK] pdf_chunks_exists={bool(exists)}")
             if not exists:
-                _print("[PG-CHECK] rag_chunks table not found. Run schema init / build-index first.")
+                _print("[PG-CHECK] pdf_chunks table not found. Run schema init / build-index first.")
                 return 3
 
-            count = conn.execute(text("select count(*) from rag_chunks")).scalar()
-            _print(f"[PG-CHECK] rag_chunks_count={int(count)}")
+            count = conn.execute(text("select count(*) from pdf_chunks")).scalar()
+            _print(f"[PG-CHECK] pdf_chunks_count={int(count)}")
 
             rows = conn.execute(
                 text(
                     """
                     select id, chunk_id, doc_id, left(content, 80) as preview, created_at
-                    from rag_chunks
+                    from pdf_chunks
                     order by id desc
                     limit 5
                     """

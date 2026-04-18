@@ -1,4 +1,4 @@
-﻿"""Load and merge YAML config files under config/yaml with graceful fallback."""
+"""Load the project config/app.yaml file with graceful YAML fallback."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_ROOT = PROJECT_ROOT / "config" / "yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.yaml"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
@@ -54,6 +54,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "provider": "qwen",
         "model": "text-embedding-v4",
         "dimension": 1024,
+        "api_key": "",
+        "api_key_env": "QWEN_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
     "storage": {
         "backend": "pgvector",
@@ -99,6 +102,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "embedding_cache_enabled": True,
         "retrieval_cache_enabled": True,
         "document_parse_cache_enabled": True,
+    },
+    "api_keys": {
+        "openai_api_key": "",
+        "deepseek_api_key": "",
+        "qwen_api_key": "",
+        "langchain_api_key": "",
+        "zhipuai_api_key": "",
+        "anthropic_api_key": "",
+        "mineru_api_key": "",
+        "mineru_api_key_env": "MinerU_API_KEY",
     },
     "guardrails": {
         "evidence_min_docs": 2,
@@ -353,19 +366,29 @@ def load_yaml_config(
     config_root: str | Path | None = None,
     extra_paths: Iterable[str | Path] | None = None,
 ) -> dict[str, Any]:
-    root = Path(config_root).expanduser() if config_root else Path(
-        os.getenv("APP_CONFIG_DIR", str(DEFAULT_CONFIG_ROOT))
-    )
-
     merged = copy.deepcopy(DEFAULT_CONFIG)
+    explicit_config_path = os.getenv("APP_CONFIG_PATH", "").strip()
 
-    yaml_paths = _discover_yaml_paths(root)
-    for yaml_path in yaml_paths:
-        merged = _deep_merge(merged, _load_yaml_file(yaml_path))
+    if config_root:
+        root = Path(config_root).expanduser()
+        if root.is_dir():
+            for yaml_path in _discover_yaml_paths(root):
+                merged = _deep_merge(merged, _load_yaml_file(yaml_path))
+        else:
+            merged = _deep_merge(merged, _load_yaml_file(root))
+    else:
+        config_path = Path(
+            explicit_config_path
+            if explicit_config_path
+            else DEFAULT_CONFIG_PATH
+        ).expanduser()
+        merged = _deep_merge(merged, _load_yaml_file(config_path))
 
-    app_config_path = os.getenv("APP_CONFIG_PATH", "").strip()
-    if app_config_path:
-        merged = _deep_merge(merged, _load_yaml_file(Path(app_config_path).expanduser()))
+        legacy_config_dir = os.getenv("APP_CONFIG_DIR", "").strip()
+        if legacy_config_dir:
+            legacy_root = Path(legacy_config_dir).expanduser()
+            for yaml_path in _discover_yaml_paths(legacy_root):
+                merged = _deep_merge(merged, _load_yaml_file(yaml_path))
 
     for extra_path in _normalize_extra_paths(extra_paths):
         merged = _deep_merge(merged, _load_yaml_file(extra_path))

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List
 
@@ -24,17 +24,26 @@ def evaluate_qa_result(
     citation_count = len(citations)
 
     citation_density = _safe_div(citation_count, max(1, evidence_count))
-    grounding = 1.0 if decision != "answer" else min(1.0, citation_density)
+    if decision == "answer":
+        grounding = min(1.0, citation_density)
+    elif decision == "clarify":
+        grounding = 1.0
+    else:
+        grounding = 0.0 if evidence_count == 0 else min(1.0, citation_density)
 
     if decision == "answer" and not has_answer:
         completeness = 0.0
-    elif decision in {"clarify", "refuse"}:
+    elif decision == "clarify":
         completeness = 1.0
+    elif decision == "refuse":
+        completeness = 0.0 if evidence_count == 0 else 0.5
     else:
         completeness = min(1.0, _safe_div(len(answer), 120.0))
 
     consistency = 1.0
     if decision == "answer" and evidence_count == 0:
+        consistency = 0.0
+    if decision == "refuse" and evidence_count == 0:
         consistency = 0.0
 
     overall = (grounding + completeness + consistency) / 3.0

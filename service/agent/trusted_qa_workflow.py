@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Dict, List
 from uuid import uuid4
@@ -9,7 +9,9 @@ from service.agent.evidence_gate import EvidenceGate
 from service.agent.query_classifier import classify_query_type
 from service.agent.query_expander import expand_queries
 from service.agent.skill_registry import DEFAULT_SKILL_REGISTRY
+from service.embedding.embedding_service import EmbeddingService, build_embedding_provider_from_config
 from service.evaluation.ragas_evaluator import evaluate_qa_result
+from service.llm import get_llm_service
 from service.retrieval.hybrid_retriever import HybridRetriever
 from service.retrieval.parallel_query_executor import ParallelQueryExecutor
 from service.retrieval.retrieval_cache import RetrievalResultCache
@@ -30,6 +32,8 @@ class TrustedQAWorkflow:
         guard_cfg = self.config.get("guardrails", {}) if isinstance(self.config.get("guardrails"), dict) else {}
         self.session_service = get_session_service()
         self.skill_registry = DEFAULT_SKILL_REGISTRY
+        self.llm_service = get_llm_service()
+        self.embedding_service = EmbeddingService(provider=build_embedding_provider_from_config(self.config))
         self.retriever = HybridRetriever(
             ParallelQueryExecutor(
                 repository=get_runtime_repository(),
@@ -38,6 +42,7 @@ class TrustedQAWorkflow:
                     max_items=int(cache_cfg.get("max_items", 5000)),
                 ),
                 query_expander=_query_expander_for_executor,
+                async_embedding_builder=lambda text_value: self.embedding_service.embed_text(text_value, use_cache=True, chunk_text=False),
                 max_concurrency=int(retrieval_cfg.get("max_concurrency", 6)),
                 query_timeout_seconds=float(retrieval_cfg.get("query_timeout_seconds", 20)),
             ),
@@ -66,7 +71,9 @@ class TrustedQAWorkflow:
         sid = session["session_id"]
         query_type = classify_query_type(question)
         selected_skill = self.skill_registry.select_skill(query_type)
-        expanded = expand_queries(question, query_type, expand_query_num)
+        llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
+        expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
+        llm_query_expansion_used = bool(llm_expanded)
         observations: List[Dict[str, Any]] = [
             {"phase": "load_session", "session_id": sid},
             {"phase": "classify_query_type", "query_type": query_type},
@@ -92,6 +99,16 @@ class TrustedQAWorkflow:
                 selected_skill.skill_name,
             )
             response["answer"] = clarify.get("clarify_question") or response["answer"]
+            response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
+            response["retrieval_trace"]["tool_chain"] = response["skill_trace"]["tool_chain"]
+            llm_trace = self.llm_service.trace_metadata()
+            llm_trace.update(
+                {
+                    "query_expansion_used": llm_query_expansion_used,
+                    "answer_generation_used": False,
+                }
+            )
+            response["retrieval_trace"]["llm"] = llm_trace
             self._save(sid, question, response)
             return response
 
@@ -102,19 +119,23 @@ class TrustedQAWorkflow:
             query_type=query_type,
             expand_query_num=max(1, int(expand_query_num)),
             enable_cache=enable_cache,
+            expanded_queries=expanded,
         )
         evidence = list(retrieval_result.get("evidence") or [])
         observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
+        slots = clarify.get("slots", {})
         gate = self.evidence_gate.evaluate(
             evidence,
             query_type=query_type,
             retry_count=0,
             table_evidence_quota=self.table_evidence_quota,
+            slots=slots,
         )
         observations.append({"phase": "evidence_gate", "gate": gate})
 
-        decision = gate["decision"]
-        if decision == "retry":
+        retry_count = 0
+        while gate.get("decision") == "retry" and retry_count < self.evidence_gate.retry_limit:
+            retry_count += 1
             retry_result = await self.retriever.retrieve(
                 question=question + " " + gate.get("reason", ""),
                 collection_name=collection_name,
@@ -128,14 +149,20 @@ class TrustedQAWorkflow:
             gate = self.evidence_gate.evaluate(
                 evidence,
                 query_type=query_type,
-                retry_count=1,
+                retry_count=retry_count,
                 table_evidence_quota=self.table_evidence_quota,
+                slots=slots,
             )
-            decision = "answer" if gate["decision"] == "answer" else gate["decision"]
-            observations.append({"phase": "retry_retrieval", "gate": gate, "evidence_count": len(evidence)})
+            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "gate": gate, "evidence_count": len(evidence)})
 
+        decision = gate.get("decision", "refuse")
+        if decision == "retry":
+            decision = "refuse"
+            gate = dict(gate)
+            gate["decision"] = "refuse"
+            gate["reason"] = gate.get("reason", "retry_limit_reached")
         if decision not in {"answer", "clarify", "refuse"}:
-            decision = "answer"
+            decision = "refuse"
 
         answer_payload = self.answer_generator.generate(
             question=question,
@@ -144,6 +171,17 @@ class TrustedQAWorkflow:
             decision=decision,
             gate_reason=gate.get("reason", ""),
         )
+        llm_answer_used = False
+        if decision == "answer":
+            llm_answer = await self.llm_service.generate_grounded_answer(
+                question=question,
+                query_type=query_type,
+                evidence=answer_payload.get("evidence", []),
+                citations=answer_payload.get("citations", []),
+            )
+            if llm_answer:
+                answer_payload["answer"] = llm_answer
+                llm_answer_used = True
         response = self._build_response(
             sid,
             query_type,
@@ -156,6 +194,16 @@ class TrustedQAWorkflow:
             expanded_queries=expanded,
             gate=gate,
         )
+        llm_trace = self.llm_service.trace_metadata()
+        llm_trace.update(
+            {
+                "query_expansion_used": llm_query_expansion_used,
+                "answer_generation_used": llm_answer_used,
+            }
+        )
+        response["retrieval_trace"]["llm"] = llm_trace
+        response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
+        response["retrieval_trace"]["tool_chain"] = response["skill_trace"]["tool_chain"]
         evaluation = evaluate_qa_result(
             question=question,
             answer=response["answer"],
@@ -223,3 +271,5 @@ _DEFAULT_WORKFLOW = TrustedQAWorkflow()
 
 def get_trusted_qa_workflow() -> TrustedQAWorkflow:
     return _DEFAULT_WORKFLOW
+
+

@@ -1,0 +1,374 @@
+﻿from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from utils.config_loader import get_app_config
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+try:
+    from openai import AsyncOpenAI
+except Exception:
+    AsyncOpenAI = None
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LEGACY_APP_CONFIG = PROJECT_ROOT / "config" / "app.yaml"
+
+
+def _load_env_once() -> None:
+    if load_dotenv is None:
+        return
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+
+def _env_truthy(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _extract_json_array(text: str) -> Optional[List[str]]:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        if isinstance(parsed, dict):
+            for key in ("queries", "expanded_queries", "items"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return [str(item).strip() for item in value if str(item).strip()]
+    except Exception:
+        pass
+
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            return None
+    return None
+
+
+def _load_legacy_llm_config() -> Dict[str, Any]:
+    if yaml is None or not LEGACY_APP_CONFIG.exists():
+        return {}
+    try:
+        loaded = yaml.safe_load(LEGACY_APP_CONFIG.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    llm = loaded.get("llm")
+    return llm if isinstance(llm, dict) else {}
+
+
+def _deep_merge_nonempty(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in incoming.items():
+        if value in (None, ""):
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_nonempty(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _env_or_literal(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    env_value = os.getenv(raw)
+    if env_value:
+        return env_value.strip()
+    if raw.startswith(("sk-", "sk_")) or (len(raw) >= 32 and not re.fullmatch(r"[A-Z0-9_]+", raw)):
+        return raw
+    return ""
+
+
+def _safe_error(error: Exception, secret: str = "") -> str:
+    text = f"{type(error).__name__}: {error}"
+    if secret:
+        text = text.replace(secret, "***")
+    return text[:700]
+
+
+def _extract_response_text(response: Any) -> str:
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    chunks: List[str] = []
+    output = getattr(response, "output", None) or []
+    for item in output:
+        content = getattr(item, "content", None)
+        if content is None and isinstance(item, dict):
+            content = item.get("content")
+        if not content:
+            continue
+        for part in content:
+            text = getattr(part, "text", None)
+            if text is None and isinstance(part, dict):
+                text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text.strip())
+    return "\n".join(chunks).strip()
+
+
+class LLMService:
+    def __init__(self, config: Dict[str, Any] | None = None) -> None:
+        _load_env_once()
+        self.config = config or get_app_config(reload=True)
+        loaded_llm = self.config.get("llm", {}) if isinstance(self.config.get("llm"), dict) else {}
+        legacy_llm = _load_legacy_llm_config() if config is None else {}
+        llm_cfg = _deep_merge_nonempty(legacy_llm, loaded_llm)
+
+        providers = llm_cfg.get("providers", {}) if isinstance(llm_cfg.get("providers"), dict) else {}
+        selector = str(llm_cfg.get("current_model") or llm_cfg.get("model") or "gpt-4o-mini").strip()
+        provider_name = str(llm_cfg.get("provider") or "").strip()
+        provider_cfg = providers.get(provider_name) if provider_name in providers else None
+        model_key = selector
+
+        if provider_cfg is not None and provider_name and selector.startswith(provider_name + "-"):
+            model_key = selector[len(provider_name) + 1 :]
+        elif provider_cfg is None and "-" in selector:
+            prefix, remainder = selector.split("-", 1)
+            if prefix in providers:
+                provider_name = prefix
+                provider_cfg = providers.get(prefix)
+                model_key = remainder
+
+        provider_cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
+        models = provider_cfg.get("models", {}) if isinstance(provider_cfg.get("models"), dict) else {}
+        model_cfg = models.get(model_key, {}) if isinstance(models.get(model_key), dict) else {}
+
+        self.provider_name = provider_name or "openai_compatible"
+        self.model = (
+            os.getenv("TRUSTED_QA_LLM_MODEL")
+            or str(model_cfg.get("model") or llm_cfg.get("model") or selector or "gpt-4o-mini")
+        )
+        self.temperature = float(os.getenv("TRUSTED_QA_LLM_TEMPERATURE") or llm_cfg.get("temperature", 0.2) or 0.2)
+        default_enabled = bool(llm_cfg.get("enable_real_generation", True))
+        self.enabled = _env_truthy("TRUSTED_QA_ENABLE_REAL_LLM", default_enabled)
+        self.timeout_seconds = float(os.getenv("TRUSTED_QA_LLM_TIMEOUT_SECONDS") or llm_cfg.get("timeout_seconds", 30) or 30)
+        self.use_responses_api = bool(llm_cfg.get("use_responses_api", provider_cfg.get("use_responses_api", False)))
+
+        yaml_api_key = str(llm_cfg.get("api_key") or "").strip()
+        provider_api_key = str(provider_cfg.get("api_key") or "").strip()
+        api_key_env = str(llm_cfg.get("api_key_env") or "").strip()
+        provider_api_key_env = str(provider_cfg.get("api_key_env") or "").strip()
+        self.api_key = (
+            yaml_api_key
+            or provider_api_key
+            or _env_or_literal(api_key_env)
+            or _env_or_literal(provider_api_key_env)
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("ANYROUTER_API_KEY")
+            or os.getenv("DASHSCOPE_API_KEY")
+            or ""
+        )
+
+        base_url_env = str(llm_cfg.get("base_url_env") or "").strip()
+        provider_base_url_env = str(provider_cfg.get("base_url_env") or "").strip()
+        self.base_url = (
+            str(llm_cfg.get("base_url") or "").strip()
+            or str(provider_cfg.get("base_url") or "").strip()
+            or (os.getenv(base_url_env) if base_url_env else "")
+            or (os.getenv(provider_base_url_env) if provider_base_url_env else "")
+            or os.getenv("OPENAI_BASE_URL")
+            or os.getenv("ANYROUTER_BASE_URL")
+            or os.getenv("DASHSCOPE_BASE_URL")
+            or None
+        )
+
+        self._install_proxy(provider_cfg)
+        self._client = None
+        self.last_error = ""
+        self.last_call_mode = ""
+        self.call_attempt_count = 0
+
+    def _install_proxy(self, provider_cfg: Dict[str, Any]) -> None:
+        proxy_pairs = {
+            "HTTP_PROXY": provider_cfg.get("http_proxy"),
+            "HTTPS_PROXY": provider_cfg.get("https_proxy"),
+            "NO_PROXY": provider_cfg.get("no_proxy"),
+        }
+        for env_name, value in proxy_pairs.items():
+            if value and not os.getenv(env_name):
+                os.environ[env_name] = str(value)
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self.enabled and self.api_key and AsyncOpenAI is not None)
+
+    def trace_metadata(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "available": self.is_available,
+            "provider": self.provider_name,
+            "model": self.model,
+            "base_url_set": bool(self.base_url),
+            "use_responses_api": self.use_responses_api,
+            "call_attempt_count": self.call_attempt_count,
+            "last_call_mode": self.last_call_mode,
+            "last_error": self.last_error,
+        }
+
+    def _client_instance(self):
+        if not self.is_available:
+            if not self.enabled:
+                self.last_error = "real LLM disabled by TRUSTED_QA_ENABLE_REAL_LLM or YAML"
+            elif not self.api_key:
+                self.last_error = "missing LLM API key"
+            elif AsyncOpenAI is None:
+                self.last_error = "openai package is not installed"
+            return None
+        if self._client is None:
+            kwargs = {"api_key": self.api_key, "timeout": self.timeout_seconds}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = AsyncOpenAI(**kwargs)
+        return self._client
+
+    async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+        client = self._client_instance()
+        if client is None:
+            return None
+
+        self.call_attempt_count += 1
+        self.last_error = ""
+        errors: List[str] = []
+
+        if self.use_responses_api and hasattr(client, "responses"):
+            try:
+                self.last_call_mode = "responses"
+                response = await client.responses.create(
+                    model=self.model,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=self.temperature,
+                    max_output_tokens=max_tokens,
+                )
+                text = _extract_response_text(response)
+                if text:
+                    self.last_error = ""
+                    return text
+            except Exception as error:
+                errors.append("responses " + _safe_error(error, self.api_key))
+
+        try:
+            self.last_call_mode = "chat.completions"
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=max_tokens,
+            )
+            if response.choices:
+                text = response.choices[0].message.content or ""
+                if text.strip():
+                    self.last_error = ""
+                    return text.strip()
+        except Exception as error:
+            errors.append("chat.completions " + _safe_error(error, self.api_key))
+
+        self.last_error = "; ".join(errors)[:1000] if errors else "LLM returned empty response"
+        return None
+
+    async def expand_queries(self, question: str, query_type: str, expand_query_num: int) -> Optional[List[str]]:
+        if not self.is_available:
+            self._client_instance()
+            return None
+        total = max(1, int(expand_query_num))
+        system_prompt = (
+            "You rewrite enterprise PDF QA questions for hybrid retrieval. "
+            "Return only a JSON array of concise retrieval queries. Do not answer the question."
+        )
+        user_prompt = (
+            f"Question: {question}\n"
+            f"Query type: {query_type}\n"
+            f"Return exactly {total} Chinese-friendly search queries. "
+            "Keep named entities, years, metrics, table headers, page hints and document targets."
+        )
+        content = await self.complete(system_prompt, user_prompt, max_tokens=320)
+        queries = _extract_json_array(content or "")
+        if not queries:
+            return None
+        deduped: List[str] = []
+        for item in [question] + queries:
+            value = str(item or "").strip()
+            if value and value not in deduped:
+                deduped.append(value)
+            if len(deduped) >= total:
+                break
+        return deduped
+
+    async def generate_grounded_answer(
+        self,
+        question: str,
+        query_type: str,
+        evidence: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        if not self.is_available or not evidence:
+            self._client_instance()
+            return None
+        evidence_lines = []
+        for index, item in enumerate(evidence[:8], start=1):
+            citation_id = citations[index - 1].get("citation_id", f"C{index}") if index - 1 < len(citations) else f"C{index}"
+            evidence_lines.append(
+                f"[{citation_id}] doc={item.get('doc_source')} page={item.get('metadata', {}).get('page_idx')} "
+                f"heading={item.get('metadata', {}).get('heading_path')} content={item.get('content')}"
+            )
+        system_prompt = (
+            "You are a trusted enterprise PDF QA agent. Answer only from the provided evidence. "
+            "Every key claim must cite citation ids like [C1]. If evidence is insufficient, say so. "
+            "For table QA, include metric, value, unit, period and source when present."
+        )
+        user_prompt = (
+            f"Question: {question}\n"
+            f"Query type: {query_type}\n"
+            "Evidence:\n" + "\n".join(evidence_lines) + "\n"
+            "Write the final answer in Chinese."
+        )
+        answer = await self.complete(system_prompt, user_prompt, max_tokens=900)
+        if not answer or not answer.strip():
+            return None
+        return answer.strip()
+
+
+_DEFAULT_LLM_SERVICE: LLMService | None = None
+
+
+def get_llm_service() -> LLMService:
+    global _DEFAULT_LLM_SERVICE
+    if _DEFAULT_LLM_SERVICE is None:
+        _DEFAULT_LLM_SERVICE = LLMService()
+    return _DEFAULT_LLM_SERVICE
+

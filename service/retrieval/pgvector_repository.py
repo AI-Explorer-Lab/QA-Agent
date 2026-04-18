@@ -3,10 +3,10 @@
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from .sparse_retriever import SparseBM25Retriever, coarse_tokenize
-from .types import ensure_candidate_dict
 
 
 try:  # pragma: no cover - optional runtime dependency for real pgvector mode.
@@ -72,6 +72,38 @@ def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     return numerator / math.sqrt(norm_a * norm_b)
 
 
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _nullable_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _json_dumps(value: Mapping[str, Any]) -> str:
+    return json.dumps(dict(value), ensure_ascii=False, default=str)
+
+
+def _vector_literal(values: Sequence[float], dim: int) -> str:
+    vector = _normalize_vector([_as_float(value) for value in values], dim)
+    return "[" + ",".join(f"{value:.10f}" for value in vector) + "]"
+
+
 class PgvectorRepository:
     """
     Unified repository interface:
@@ -95,39 +127,73 @@ class PgvectorRepository:
         self._local_chunks: list[Dict[str, Any]] = []
         self._sparse_retriever = SparseBM25Retriever()
         self._engine = None
+        self._schema_ready = False
+        self.revision = 0
 
         if local_chunks:
             self.upsert_chunks(local_chunks)
 
     def upsert_chunks(self, chunks: Iterable[Mapping[str, Any]]) -> int:
-        indexed: Dict[str, Dict[str, Any]] = {str(chunk.get("chunk_id") or ""): dict(chunk) for chunk in self._local_chunks}
-
-        count = 0
-        for source in chunks:
-            chunk = ensure_candidate_dict(source)
-            chunk_id = str(chunk.get("chunk_id") or "").strip()
-            if not chunk_id:
-                basis = str(chunk.get("raw_doc") or chunk.get("content") or count)
-                chunk_id = "chunk-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
-                chunk["chunk_id"] = chunk_id
-
-            chunk.setdefault("collection_name", "default")
-            chunk.setdefault("raw_doc", str(chunk.get("raw_doc") or chunk.get("content") or ""))
-            chunk.setdefault("chunk_type", str(chunk.get("chunk_type") or "text"))
-
-            embedding = chunk.get("embedding")
-            if isinstance(embedding, Sequence) and not isinstance(embedding, (str, bytes)):
-                vector = _normalize_vector([_as_float(item) for item in embedding], self.embedding_dim)
-            else:
-                vector = deterministic_embedding(str(chunk.get("raw_doc") or ""), self.embedding_dim)
-            chunk["embedding"] = vector
-
-            indexed[chunk_id] = chunk
-            count += 1
-
-        self._local_chunks = list(indexed.values())
-        self._sparse_retriever.index_chunks(self._local_chunks)
+        prepared = [self._prepare_chunk(source) for source in chunks]
+        if not prepared:
+            return 0
+        if self.backend == "pgvector":
+            count = self._upsert_chunks_pgvector(prepared)
+        elif self.backend == "local_dev":
+            count = self._upsert_chunks_local(prepared)
+        else:
+            raise RuntimeError(f"Unsupported repository backend: {self.backend}")
+        if count:
+            self.revision += 1
         return count
+
+    def replace_collection_chunks(self, collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
+        collection = _clean_text(collection_name) or "default"
+        prepared = [self._prepare_chunk(source) for source in chunks]
+        for row in prepared:
+            row["collection_name"] = collection
+        if self.backend == "pgvector":
+            count = self._replace_collection_pgvector(collection, prepared)
+        elif self.backend == "local_dev":
+            self._delete_collection_local(collection)
+            count = self._upsert_chunks_local(prepared)
+        else:
+            raise RuntimeError(f"Unsupported repository backend: {self.backend}")
+        self.revision += 1
+        return count
+
+    def delete_collection(self, collection_name: str) -> int:
+        collection = _clean_text(collection_name)
+        if not collection:
+            raise ValueError("collection_name is required when deleting indexed chunks.")
+        if self.backend == "pgvector":
+            count = self._delete_collection_pgvector(collection)
+        elif self.backend == "local_dev":
+            count = self._delete_collection_local(collection)
+        else:
+            raise RuntimeError(f"Unsupported repository backend: {self.backend}")
+        self.revision += 1
+        return count
+
+    def clear_local(self) -> None:
+        self._local_chunks = []
+        self._sparse_retriever.index_chunks([])
+        self.revision += 1
+
+    def count_collection_chunks(self, collection_name: str = "") -> int:
+        collection = _clean_text(collection_name)
+        if self.backend == "pgvector":
+            engine = self._engine_instance()
+            sql = "SELECT COUNT(*) FROM pdf_chunks"
+            params: Dict[str, Any] = {}
+            if collection:
+                sql += " WHERE collection_name = :collection_name"
+                params["collection_name"] = collection
+            with engine.begin() as connection:
+                return int(connection.execute(text(sql), params).scalar() or 0)
+        if not collection:
+            return len(self._local_chunks)
+        return len([row for row in self._local_chunks if str(row.get("collection_name") or "") == collection])
 
     def list_local_chunks(self, collection_name: str = "") -> list[Dict[str, Any]]:
         if not collection_name:
@@ -146,17 +212,14 @@ class PgvectorRepository:
         query_text: str = "",
         chunk_type: str | None = None,
     ) -> list[Dict[str, Any]]:
-        if self.backend == "pgvector" and self.database_url:
-            try:
-                return self._dense_search_pgvector(
-                    collection_name=collection_name,
-                    query_embedding=query_embedding,
-                    top_k=top_k,
-                    query_text=query_text,
-                    chunk_type=chunk_type,
-                )
-            except Exception:
-                pass
+        if self.backend == "pgvector":
+            return self._dense_search_pgvector(
+                collection_name=collection_name,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                query_text=query_text,
+                chunk_type=chunk_type,
+            )
 
         embedding = query_embedding
         if embedding is None:
@@ -190,16 +253,13 @@ class PgvectorRepository:
     ) -> list[Dict[str, Any]]:
         effective_chunk_type = "table" if table_only else chunk_type
 
-        if self.backend == "pgvector" and self.database_url:
-            try:
-                return self._keyword_search_pgvector(
-                    collection_name=collection_name,
-                    query_text=query_text,
-                    top_k=top_k,
-                    chunk_type=effective_chunk_type,
-                )
-            except Exception:
-                pass
+        if self.backend == "pgvector":
+            return self._keyword_search_pgvector(
+                collection_name=collection_name,
+                query_text=query_text,
+                top_k=top_k,
+                chunk_type=effective_chunk_type,
+            )
 
         filtered = []
         for chunk in self._local_chunks:
@@ -230,6 +290,198 @@ class PgvectorRepository:
             table_only=True,
         )
 
+    def _prepare_chunk(self, source: Mapping[str, Any]) -> Dict[str, Any]:
+        chunk = dict(source)
+        metadata = dict(chunk.get("metadata") or {}) if isinstance(chunk.get("metadata"), Mapping) else {}
+        content = _clean_text(chunk.get("raw_doc") or chunk.get("content"))
+        collection_name = _clean_text(chunk.get("collection_name")) or "default"
+        doc_source = _clean_text(chunk.get("doc_source") or chunk.get("source"))
+        doc_id = _clean_text(chunk.get("doc_id"))
+        if not doc_id:
+            basis = "|".join([collection_name, doc_source, content[:500]])
+            doc_id = "doc_" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+        chunk_id = _clean_text(chunk.get("chunk_id"))
+        if not chunk_id:
+            basis = "|".join([doc_id, content, str(chunk.get("chunk_index") or "")])
+            chunk_id = "chunk_" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+        chunk_type = _clean_text(chunk.get("chunk_type") or metadata.get("chunk_type")) or "text"
+        page_idx = _nullable_int(chunk.get("page_idx") if chunk.get("page_idx") is not None else metadata.get("page_idx"))
+        chunk_index = _as_int(chunk.get("chunk_index") if chunk.get("chunk_index") is not None else metadata.get("chunk_index"), 0)
+        page_range = _clean_text(chunk.get("page_range") or metadata.get("page_range"))
+        heading_path = _clean_text(chunk.get("heading_path") or metadata.get("heading_path"))
+        level1_title = _clean_text(chunk.get("level1_title") or metadata.get("level1_title"))
+        level2_title = _clean_text(chunk.get("level2_title") or metadata.get("level2_title"))
+        level3_title = _clean_text(chunk.get("level3_title") or metadata.get("level3_title"))
+        table_id = _clean_text(chunk.get("table_id") or metadata.get("table_id"))
+        sub_table_id = _clean_text(chunk.get("sub_table_id") or metadata.get("sub_table_id"))
+        table_header_text = _clean_text(chunk.get("table_header_text") or metadata.get("table_header_text"))
+        table_context_text = _clean_text(chunk.get("table_context_text") or metadata.get("table_context_text"))
+        search_text = "\n".join(part for part in [content, heading_path, table_header_text, table_context_text] if part)
+
+        embedding = chunk.get("embedding")
+        if isinstance(embedding, Sequence) and not isinstance(embedding, (str, bytes)):
+            vector = _normalize_vector([_as_float(item) for item in embedding], self.embedding_dim)
+        else:
+            vector = deterministic_embedding(content, self.embedding_dim)
+
+        row = {
+            "chunk_id": chunk_id,
+            "doc_id": doc_id,
+            "collection_name": collection_name,
+            "doc_source": doc_source,
+            "title": _clean_text(chunk.get("title")) or (Path(doc_source).stem if doc_source else ""),
+            "doc_hash": _clean_text(chunk.get("doc_hash") or metadata.get("doc_hash")),
+            "page_count": _as_int(chunk.get("page_count") or metadata.get("page_count"), 0),
+            "page_idx": page_idx,
+            "page_range": page_range,
+            "chunk_type": chunk_type,
+            "chunk_index": chunk_index,
+            "heading_path": heading_path,
+            "level1_title": level1_title,
+            "level2_title": level2_title,
+            "level3_title": level3_title,
+            "table_id": table_id,
+            "sub_table_id": sub_table_id,
+            "table_header_text": table_header_text,
+            "table_context_text": table_context_text,
+            "search_text": search_text or content,
+            "content": content,
+            "raw_doc": content,
+            "embedding": vector,
+            "source_channels": list(chunk.get("source_channels") or []),
+        }
+        metadata.update({key: value for key, value in row.items() if key != "embedding"})
+        row["metadata_json"] = metadata
+        return row
+
+    def _upsert_chunks_local(self, chunks: Iterable[Mapping[str, Any]]) -> int:
+        indexed: Dict[str, Dict[str, Any]] = {str(chunk.get("chunk_id") or ""): dict(chunk) for chunk in self._local_chunks}
+        count = 0
+        for source in chunks:
+            chunk = dict(source)
+            indexed[str(chunk.get("chunk_id") or "")] = chunk
+            count += 1
+        self._local_chunks = list(indexed.values())
+        self._sparse_retriever.index_chunks(self._local_chunks)
+        return count
+
+    def _delete_collection_local(self, collection_name: str) -> int:
+        before = len(self._local_chunks)
+        self._local_chunks = [row for row in self._local_chunks if str(row.get("collection_name") or "") != collection_name]
+        self._sparse_retriever.index_chunks(self._local_chunks)
+        return before - len(self._local_chunks)
+
+    def _engine_instance(self):
+        if self.backend != "pgvector":
+            raise RuntimeError("PG engine requested for a non-pgvector repository.")
+        if not self.database_url:
+            raise RuntimeError("PGVECTOR_DATABASE_URL is empty. Configure storage.pgvector.database_url in config/app.yaml.")
+        if create_engine is None or text is None:
+            raise RuntimeError("SQLAlchemy is unavailable. Install sqlalchemy and psycopg2-binary.")
+        if not self._schema_ready:
+            from database.init_db import init_pgvector_schema
+
+            init_pgvector_schema(database_url=self.database_url)
+            self._schema_ready = True
+        if self._engine is None:
+            self._engine = create_engine(self.database_url, pool_pre_ping=True)
+        return self._engine
+
+    def _upsert_chunks_pgvector(self, chunks: Sequence[Mapping[str, Any]]) -> int:
+        engine = self._engine_instance()
+        doc_sql = text("""
+            INSERT INTO pdf_documents (doc_id, collection_name, doc_source, title, doc_hash, page_count, metadata_json, indexed_at, created_at, updated_at)
+            VALUES (:doc_id, :collection_name, :doc_source, :title, :doc_hash, :page_count, CAST(:metadata_json AS jsonb), NOW(), NOW(), NOW())
+            ON CONFLICT (doc_id) DO UPDATE SET
+                collection_name = EXCLUDED.collection_name,
+                doc_source = EXCLUDED.doc_source,
+                title = EXCLUDED.title,
+                doc_hash = EXCLUDED.doc_hash,
+                page_count = GREATEST(pdf_documents.page_count, EXCLUDED.page_count),
+                metadata_json = EXCLUDED.metadata_json,
+                indexed_at = NOW(),
+                updated_at = NOW()
+        """)
+        chunk_sql = text("""
+            INSERT INTO pdf_chunks (
+                chunk_id, doc_id, collection_name, doc_source, page_idx, page_range, chunk_type, chunk_index,
+                heading_path, level1_title, level2_title, level3_title,
+                table_id, sub_table_id, table_header_text, table_context_text,
+                search_text, content, metadata_json, embedding, created_at, updated_at
+            ) VALUES (
+                :chunk_id, :doc_id, :collection_name, :doc_source, :page_idx, :page_range, :chunk_type, :chunk_index,
+                :heading_path, :level1_title, :level2_title, :level3_title,
+                :table_id, :sub_table_id, :table_header_text, :table_context_text,
+                :search_text, :content, CAST(:metadata_json AS jsonb), CAST(:embedding AS vector), NOW(), NOW()
+            )
+            ON CONFLICT (chunk_id) DO UPDATE SET
+                doc_id = EXCLUDED.doc_id,
+                collection_name = EXCLUDED.collection_name,
+                doc_source = EXCLUDED.doc_source,
+                page_idx = EXCLUDED.page_idx,
+                page_range = EXCLUDED.page_range,
+                chunk_type = EXCLUDED.chunk_type,
+                chunk_index = EXCLUDED.chunk_index,
+                heading_path = EXCLUDED.heading_path,
+                level1_title = EXCLUDED.level1_title,
+                level2_title = EXCLUDED.level2_title,
+                level3_title = EXCLUDED.level3_title,
+                table_id = EXCLUDED.table_id,
+                sub_table_id = EXCLUDED.sub_table_id,
+                table_header_text = EXCLUDED.table_header_text,
+                table_context_text = EXCLUDED.table_context_text,
+                search_text = EXCLUDED.search_text,
+                content = EXCLUDED.content,
+                metadata_json = EXCLUDED.metadata_json,
+                embedding = EXCLUDED.embedding,
+                updated_at = NOW()
+        """)
+        docs: Dict[str, Dict[str, Any]] = {}
+        chunk_rows: list[Dict[str, Any]] = []
+        for chunk in chunks:
+            row = dict(chunk)
+            page_count = _as_int(row.get("page_count"), 0)
+            if page_count <= 0 and row.get("page_idx") is not None:
+                page_count = _as_int(row.get("page_idx"), -1) + 1
+            doc_payload = {
+                "doc_id": row["doc_id"],
+                "collection_name": row["collection_name"],
+                "doc_source": row["doc_source"],
+                "title": row.get("title") or "",
+                "doc_hash": row.get("doc_hash") or "",
+                "page_count": max(0, page_count),
+                "metadata_json": _json_dumps({"doc_source": row["doc_source"], "doc_hash": row.get("doc_hash") or ""}),
+            }
+            current = docs.get(str(row["doc_id"]))
+            if current is None or doc_payload["page_count"] > current["page_count"]:
+                docs[str(row["doc_id"])] = doc_payload
+            row["metadata_json"] = _json_dumps(row.get("metadata_json") or {})
+            row["embedding"] = _vector_literal(row.get("embedding") or [], self.embedding_dim)
+            chunk_rows.append(row)
+        with engine.begin() as connection:
+            for doc in docs.values():
+                connection.execute(doc_sql, doc)
+            for row in chunk_rows:
+                connection.execute(chunk_sql, row)
+        return len(chunk_rows)
+
+    def _replace_collection_pgvector(self, collection_name: str, chunks: Sequence[Mapping[str, Any]]) -> int:
+        engine = self._engine_instance()
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            connection.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+        if not chunks:
+            return 0
+        return self._upsert_chunks_pgvector(chunks)
+
+    def _delete_collection_pgvector(self, collection_name: str) -> int:
+        engine = self._engine_instance()
+        with engine.begin() as connection:
+            result = connection.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            connection.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+        return int(result.rowcount or 0)
+
     def _dense_search_pgvector(
         self,
         collection_name: str,
@@ -238,16 +490,11 @@ class PgvectorRepository:
         query_text: str,
         chunk_type: str | None,
     ) -> list[Dict[str, Any]]:
-        if create_engine is None or text is None:
-            raise RuntimeError("sqlalchemy is unavailable")
-
         if query_embedding is None:
             query_embedding = deterministic_embedding(query_text, self.embedding_dim)
 
-        vector_literal = "[" + ",".join(f"{_as_float(value):.10f}" for value in query_embedding[: self.embedding_dim]) + "]"
-
-        if self._engine is None:
-            self._engine = create_engine(self.database_url, pool_pre_ping=True)
+        vector_literal = _vector_literal(query_embedding, self.embedding_dim)
+        self._engine_instance()
 
         sql = text(
             """
@@ -317,11 +564,7 @@ class PgvectorRepository:
         top_k: int,
         chunk_type: str | None,
     ) -> list[Dict[str, Any]]:
-        if create_engine is None or text is None:
-            raise RuntimeError("sqlalchemy is unavailable")
-
-        if self._engine is None:
-            self._engine = create_engine(self.database_url, pool_pre_ping=True)
+        self._engine_instance()
 
         query_tokens = coarse_tokenize(query_text)
         if not query_tokens:
@@ -334,27 +577,24 @@ class PgvectorRepository:
                 doc_id,
                 collection_name,
                 doc_source,
+                search_text,
                 content AS raw_doc,
-                metadata_json,
-                CASE
-                    WHEN content ILIKE :query_pattern THEN 1.0
-                    ELSE 0.0
-                END AS lexical_score
+                metadata_json
             FROM pdf_chunks
             WHERE (:collection_name = '' OR collection_name = :collection_name)
-              AND (:chunk_type = '' OR metadata_json ->> 'chunk_type' = :chunk_type)
-              AND content ILIKE :query_pattern
+              AND (:chunk_type = '' OR chunk_type = :chunk_type)
+            ORDER BY id DESC
             LIMIT :scan_limit
             """
         )
 
-        scan_limit = max(50, int(top_k) * 6)
+        token_set = set(query_tokens)
+        scan_limit = max(200, int(top_k) * 40)
         rows: list[Dict[str, Any]] = []
         with self._engine.begin() as connection:
             records = connection.execute(
                 sql,
                 {
-                    "query_pattern": f"%{query_text}%",
                     "collection_name": collection_name,
                     "chunk_type": chunk_type or "",
                     "scan_limit": scan_limit,
@@ -369,9 +609,14 @@ class PgvectorRepository:
                     except Exception:
                         metadata = {}
                 content = str(record.get("raw_doc") or "")
-                content_tokens = set(coarse_tokenize(content))
-                overlap = len(set(query_tokens) & content_tokens)
-                score = overlap / max(1, len(set(query_tokens)))
+                search_text = str(record.get("search_text") or content)
+                content_tokens = set(coarse_tokenize(search_text))
+                overlap = len(token_set & content_tokens)
+                score = overlap / max(1, len(token_set))
+                if query_text and query_text in search_text:
+                    score = max(score, 1.0)
+                if score <= 0:
+                    continue
                 payload = {
                     "chunk_id": record.get("chunk_id"),
                     "doc_id": record.get("doc_id") or "",

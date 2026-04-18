@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import Any, Callable, Dict, Iterable, List, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Sequence
 
 from .pgvector_repository import PgvectorRepository, deterministic_embedding
 from .retrieval_cache import RetrievalResultCache
@@ -94,6 +94,7 @@ class ParallelQueryExecutor:
         retrieval_cache: RetrievalResultCache | None = None,
         query_expander: Callable[[str, int], Iterable[str]] | None = None,
         embedding_builder: Callable[[str, int], Sequence[float]] | None = None,
+        async_embedding_builder: Callable[[str], Awaitable[Sequence[float]]] | None = None,
         max_concurrency: int = 6,
         query_timeout_seconds: float = 20.0,
     ) -> None:
@@ -101,6 +102,7 @@ class ParallelQueryExecutor:
         self.retrieval_cache = retrieval_cache
         self.query_expander = query_expander or default_query_expander
         self.embedding_builder = embedding_builder or deterministic_embedding
+        self.async_embedding_builder = async_embedding_builder
         self.max_concurrency = max(1, int(max_concurrency))
         self.query_timeout_seconds = max(0.01, float(query_timeout_seconds))
 
@@ -112,17 +114,28 @@ class ParallelQueryExecutor:
         query_type: str,
         expand_query_num: int,
         enable_cache: bool = True,
+        expanded_queries: Sequence[str] | None = None,
     ) -> Dict[str, Any]:
         effective_top_k = max(1, int(top_k))
         query_text = str(question or "").strip()
         effective_query_type = str(query_type or "fact_lookup")
         question_hash = stable_sha256(query_text)
+        repository_revision = int(getattr(self.repository, "revision", 0) or 0)
+        repository_backend = str(getattr(self.repository, "backend", "unknown") or "unknown")
+        repository_database_url_set = bool(getattr(self.repository, "database_url", ""))
+        repository_collection_count = -1
+        repository_count_error = ""
+        try:
+            repository_collection_count = int(self.repository.count_collection_chunks(collection_name))
+        except Exception as exc:
+            repository_count_error = str(exc)
+        cache_hash = f"{question_hash}:r{repository_revision}:c{repository_collection_count}"
 
         cache_key = None
         if self.retrieval_cache is not None:
             cache_key = self.retrieval_cache.build_key(
                 collection_name=collection_name,
-                question_hash=question_hash,
+                question_hash=cache_hash,
                 query_type=effective_query_type,
                 top_k=effective_top_k,
             )
@@ -132,6 +145,9 @@ class ParallelQueryExecutor:
                     trace = dict(cached.get("retrieval_trace") or {})
                     trace["cache_hit"] = True
                     trace["cache_key"] = cache_key.as_storage_key()
+                    trace["repository_revision"] = repository_revision
+                    trace["repository_backend"] = repository_backend
+                    trace["repository_collection_count"] = repository_collection_count
                     trace["cached_at"] = trace.get("generated_at")
                     trace["generated_at"] = time.time()
                     return {
@@ -139,7 +155,7 @@ class ParallelQueryExecutor:
                         "retrieval_trace": trace,
                     }
 
-        query_variants = self._build_query_variants(query_text, expand_query_num)
+        query_variants = self._build_query_variants(query_text, expand_query_num, expanded_queries=expanded_queries)
         stage_top_n = max(effective_top_k * 4, effective_top_k)
         semaphore = asyncio.Semaphore(self.max_concurrency)
         should_run_table = effective_query_type == "table_qa" or _looks_like_table_query(query_text)
@@ -189,6 +205,11 @@ class ParallelQueryExecutor:
             "question_hash": question_hash,
             "query_type": effective_query_type,
             "top_k": effective_top_k,
+            "repository_backend": repository_backend,
+            "repository_database_url_set": repository_database_url_set,
+            "repository_revision": repository_revision,
+            "repository_collection_count": repository_collection_count,
+            "repository_count_error": repository_count_error,
             "query_variants": query_variants,
             "task_count": len(raw_task_results),
             "max_concurrency": self.max_concurrency,
@@ -220,9 +241,17 @@ class ParallelQueryExecutor:
 
         return payload
 
-    def _build_query_variants(self, question: str, expand_query_num: int) -> list[str]:
+    def _build_query_variants(
+        self,
+        question: str,
+        expand_query_num: int,
+        expanded_queries: Sequence[str] | None = None,
+    ) -> list[str]:
         base = str(question or "").strip()
-        expanded = list(self.query_expander(base, expand_query_num))
+        if expanded_queries is None:
+            expanded = list(self.query_expander(base, expand_query_num))
+        else:
+            expanded = [str(item or "").strip() for item in expanded_queries]
         variants: list[str] = []
         for item in [base] + expanded:
             value = str(item or "").strip()
@@ -246,8 +275,7 @@ class ParallelQueryExecutor:
         async with semaphore:
             try:
                 items = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._execute_route_sync,
+                    self._execute_route_async(
                         route,
                         query,
                         collection_name,
@@ -272,6 +300,32 @@ class ParallelQueryExecutor:
             "returned": len(items),
             "items": items,
         }
+
+    async def _execute_route_async(
+        self,
+        route: str,
+        query: str,
+        collection_name: str,
+        top_k: int,
+    ) -> list[Dict[str, Any]]:
+        if route == "dense" and self.async_embedding_builder is not None:
+            embedding = await self.async_embedding_builder(query)
+            rows = await asyncio.to_thread(
+                self.repository.dense_search,
+                collection_name=collection_name,
+                query_embedding=embedding,
+                query_text=query,
+                top_k=top_k,
+                chunk_type=None,
+            )
+            return [self._normalize_route_item(row, route, collection_name) for row in rows]
+        return await asyncio.to_thread(
+            self._execute_route_sync,
+            route,
+            query,
+            collection_name,
+            top_k,
+        )
 
     def _execute_route_sync(
         self,
