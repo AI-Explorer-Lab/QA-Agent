@@ -17,3 +17,12 @@ docs/generated_chunks
 nul
 .conda_envs
 .conda_envs/*
+.tmp_conda_pkgs/
+.tmp_pip/
+.tmp_pip_work/
+tmp_pip_direct/
+tmp_pip_proxy/
+.tmp_condarc_direct.yaml
+.vendor/
+.pytest_cache/
+.tmp_pytest_workspace/

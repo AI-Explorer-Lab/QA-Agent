@@ -1,5 +1,0 @@
-﻿channels:
-  - defaults
-ssl_verify: true
-show_channel_urls: true
-channel_priority: flexible

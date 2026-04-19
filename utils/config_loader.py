@@ -33,7 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tokens": 2048,
     },
     "agent": {
-        "orchestration": "react_with_skills",
+        "orchestration": "trusted_qa_workflow",
         "max_iterations": 6,
         "skill_trace_enabled": True,
         "default_skill": "fact_lookup",
@@ -107,7 +107,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "openai_api_key": "",
         "deepseek_api_key": "",
         "qwen_api_key": "",
-        "langchain_api_key": "",
         "zhipuai_api_key": "",
         "anthropic_api_key": "",
         "mineru_api_key": "",

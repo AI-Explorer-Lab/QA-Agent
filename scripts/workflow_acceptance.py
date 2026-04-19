@@ -13,12 +13,12 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ["TRUSTED_QA_ENABLE_REAL_LLM"] = "0"
 
 from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
-from service.retrieval.runtime import reset_runtime_repository, upsert_runtime_chunks
+from service.retrieval.runtime import replace_collection_chunks
 
 
 async def main() -> None:
-    reset_runtime_repository()
-    upsert_runtime_chunks(
+    replace_collection_chunks(
+        "acceptance",
         [
             {
                 "chunk_id": "acceptance-1",

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import tempfile
 import unittest
@@ -24,8 +24,8 @@ def _create_sample_pdf(path: Path) -> None:
 
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text((72, 72), "2025年收入为123亿元，毛利率34%。")
-        page.insert_text((72, 120), "表4 指标 | 数值 | 单位")
+        page.insert_text((72, 72), "2025 revenue was 123 billion yuan, gross margin was 34 percent.")
+        page.insert_text((72, 120), "Table 4 Metric | Value | Unit")
         doc.save(str(path))
         doc.close()
     except Exception:
@@ -36,6 +36,7 @@ class QAApiTestCase(unittest.TestCase):
     def test_only_required_endpoints_exposed(self):
         self.assertEqual(client.post("/askLLM").status_code, 404)
         self.assertEqual(client.post("/team-leader-task").status_code, 404)
+        self.assertEqual(client.post("/react-ask").status_code, 404)
 
     def test_health_endpoint(self):
         response = client.get("/health")
@@ -64,7 +65,7 @@ class QAApiTestCase(unittest.TestCase):
             ask_resp = client.post(
                 "/qa/ask",
                 json={
-                    "question": "请基于文档回答2025年收入是多少，并给出引用",
+                    "question": "Based on the document, what was 2025 revenue? Provide citations.",
                     "collection_name": "qa_api_test",
                     "top_k": 5,
                     "expand_query_num": 3,

@@ -244,15 +244,9 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
     vector = config.get("vector", {}) if isinstance(config.get("vector"), dict) else {}
     storage = config.get("storage", {}) if isinstance(config.get("storage"), dict) else {}
     storage_pgvector = storage.get("pgvector", {}) if isinstance(storage.get("pgvector"), dict) else {}
-    rag = config.get("rag", {}) if isinstance(config.get("rag"), dict) else {}
     retrieval = config.get("retrieval", {}) if isinstance(config.get("retrieval"), dict) else {}
     chunking = config.get("chunking", {}) if isinstance(config.get("chunking"), dict) else {}
     embedding = config.get("embedding", {}) if isinstance(config.get("embedding"), dict) else {}
-    react_guardrails = (
-        config.get("react_guardrails", {})
-        if isinstance(config.get("react_guardrails"), dict)
-        else {}
-    )
 
     mineru_api_key_env = _clean_str(keys.get("mineru_api_key_env") or "MinerU_API_KEY")
     mineru_api_key = _clean_str(keys.get("mineru_api_key"))
@@ -268,7 +262,6 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
         "OPENAI_API_KEY": keys.get("openai_api_key"),
         "DEEPSEEK_API_KEY": keys.get("deepseek_api_key"),
         "QWEN_API_KEY": embedding_api_key,
-        "LANGCHAIN_API_KEY": keys.get("langchain_api_key"),
         "ZHIPUAI_API_KEY": keys.get("zhipuai_api_key"),
         "ANTHROPIC_API_KEY": keys.get("anthropic_api_key"),
         "MinerU_API_KEY": mineru_api_key,
@@ -284,8 +277,6 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
         "VECTOR_STORE_BACKEND": storage.get("backend") or vector.get("backend"),
         "PGVECTOR_DATABASE_URL": storage_pgvector.get("database_url") or vector.get("pgvector_database_url"),
         "PGVECTOR_EMBEDDING_DIM": storage_pgvector.get("embedding_dim") or vector.get("pgvector_embedding_dim"),
-        "RAG_EXPAND_QUERY_NUM": rag.get("expand_query_num"),
-        "RAG_RETRIEVED_ANSWERS": rag.get("retrieved_answers"),
         "HYBRID_DENSE_POOL_FACTOR": retrieval.get("hybrid_dense_pool_factor"),
         "HYBRID_SPARSE_POOL_FACTOR": retrieval.get("hybrid_sparse_pool_factor"),
         "HYBRID_SPARSE_ALGORITHM": retrieval.get("sparse_algorithm"),
@@ -300,15 +291,6 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
         "CHUNK_OVERLAP_TOKENS": chunking.get("chunk_overlap_tokens"),
         "MAX_CHUNK_SIZE": chunking.get("max_chunk_size"),
         "CHUNK_HEADING_MAX_LEVEL": chunking.get("heading_max_level"),
-        "REACT_CLARIFY_ENABLED": react_guardrails.get("clarify_enabled"),
-        "REACT_CLARIFY_RAG_ONLY": react_guardrails.get("clarify_rag_only"),
-        "REACT_CLARIFY_MAX_TURNS": react_guardrails.get("clarify_max_turns"),
-        "REACT_EVIDENCE_MIN_DOCS": react_guardrails.get("evidence_min_docs"),
-        "REACT_EVIDENCE_MIN_TOP_SIMILARITY": react_guardrails.get("evidence_min_top_similarity"),
-        "REACT_EVIDENCE_MIN_AVG_SIMILARITY": react_guardrails.get("evidence_min_avg_similarity"),
-        "REACT_EVIDENCE_MIN_OVERALL_SCORE": react_guardrails.get("evidence_min_overall_score"),
-        "REACT_EVIDENCE_RETRY_LIMIT": react_guardrails.get("evidence_retry_limit"),
-        "REACT_REFUSE_ON_LOW_EVIDENCE": react_guardrails.get("refuse_on_low_evidence"),
     }
     env_map.update(_resolve_llm_values(llm))
     if mineru_api_key and mineru_api_key_env:
