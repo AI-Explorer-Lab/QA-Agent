@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List
 from uuid import uuid4
@@ -73,7 +73,7 @@ class TrustedQAWorkflow:
         selected_skill = self.skill_registry.select_skill(query_type)
         llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
         expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
-        llm_query_expansion_used = bool(llm_expanded)
+        llm_expansion_used = bool(llm_expanded)
         observations: List[Dict[str, Any]] = [
             {"phase": "load_session", "session_id": sid},
             {"phase": "classify_query_type", "query_type": query_type},
@@ -104,7 +104,7 @@ class TrustedQAWorkflow:
             llm_trace = self.llm_service.trace_metadata()
             llm_trace.update(
                 {
-                    "query_expansion_used": llm_query_expansion_used,
+                    "query_expansion_used": llm_expansion_used,
                     "answer_generation_used": False,
                 }
             )
@@ -197,7 +197,7 @@ class TrustedQAWorkflow:
         llm_trace = self.llm_service.trace_metadata()
         llm_trace.update(
             {
-                "query_expansion_used": llm_query_expansion_used,
+                "query_expansion_used": llm_expansion_used,
                 "answer_generation_used": llm_answer_used,
             }
         )

@@ -72,7 +72,7 @@ storage:
     enabled: false
     database_url: sqlite:///database/local_dev.db
 agent:
-  orchestration: react_with_skills
+  orchestration: trusted_qa_workflow
   max_iterations: 6
   skill_trace_enabled: true
   default_skill: fact_lookup
@@ -136,7 +136,6 @@ api_keys:
   openai_api_key: ''
   deepseek_api_key: ''
   qwen_api_key: ***REMOVED_API_KEY***
-  langchain_api_key: ''
   zhipuai_api_key: ''
   anthropic_api_key: ''
   mineru_api_key: ***REMOVED_JWT***
@@ -145,16 +144,3 @@ vector:
   backend: pgvector
   pgvector_database_url: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa
   pgvector_embedding_dim: 1024
-rag:
-  expand_query_num: 3
-  retrieved_answers: 5
-react_guardrails:
-  clarify_enabled: true
-  clarify_rag_only: true
-  clarify_max_turns: 1
-  evidence_min_docs: 2
-  evidence_min_top_similarity: 0.45
-  evidence_min_avg_similarity: 0.3
-  evidence_min_overall_score: 0.3
-  evidence_retry_limit: 2
-  refuse_on_low_evidence: true

@@ -35,8 +35,6 @@ app.add_middleware(RequestLogMiddleware)
 app.add_exception_handler(Exception, app_exception_handler)
 app.include_router(router)
 
-# Backward-compatible variable name for older run commands, but only new routes are included.
-app_chat_llm = app
 
 
 if __name__ == "__main__":

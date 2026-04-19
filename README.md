@@ -1,17 +1,8 @@
 # Enterprise Unstructured Document Trusted QA Agent
 
-???????? PDF ??????????? Agent ???????? `plan.md` ??? PDF-only ????????????????
+Trusted QA service for enterprise PDF documents. The active system is centered on the `service.*` stack: PDF indexing, hybrid retrieval, evidence gating, grounded answer generation, citations, and session traces.
 
-## ????
-
-- PDF ??? MinerU-style ??????????? PyMuPDF/minimal fallback ?????
-- ???????/????? chunk?????????1024 ? deterministic embedding fallback?
-- ?? Hybrid Retrieval?dense + BM25 + metadata/table-aware retrieval????? FAISS/pgvector/hybrid ????
-- ?????TTL retrieval cache?Two-Stage Hybrid Reranker?Evidence Gate?
-- Single ReAct Agent + multi-skill architecture?FactLookup?TableQA?CitationLocate?Summarization?ReportGeneration?MultiDocCompare?
-- ?????? citation/evidence/retrieval_trace/rerank_trace/session_id?
-
-## API
+## Active API
 
 ```text
 GET  /health
@@ -20,36 +11,32 @@ POST /qa/ask
 GET  /qa/sessions/{session_id}
 ```
 
-`POST /documents/index`:
+Legacy chat-llm endpoints are intentionally not mounted:
 
-```json
-{
-  "pdf_path": "docs/pdf_docs/example.pdf",
-  "force_rebuild": true,
-  "collection_name": "default"
-}
+```text
+POST /askLLM
+POST /team-leader-task
+POST /react-ask
 ```
 
-`POST /qa/ask`:
+## Runtime Path
 
-```json
-{
-  "question": "?????????????",
-  "session_id": "",
-  "collection_name": "default",
-  "top_k": 5,
-  "expand_query_num": 3,
-  "enable_cache": true
-}
+```text
+main.py
+  -> controller.apis
+  -> controller.apis.document_controller / qa_controller / session_controller
+  -> service.pdf / service.agent.trusted_qa_workflow / service.retrieval
 ```
 
-## ????
+The old LangGraph, llm_chat, llm_query, llm_rag, and react-ask implementation has been removed from the runtime tree.
+
+## Run
 
 ```bash
 python -m uvicorn main:app --reload
 ```
 
-## ??
+## Test
 
 ```bash
 python -m pytest tests -q
@@ -58,10 +45,14 @@ python scripts/e2e_acceptance.py
 python scripts/pgvector_smoke.py
 ```
 
-## ???????
+## Configuration
 
-LLM ????? `config/app.yaml` ? `llm` ????`model/current_model`?`api_key`?`base_url`?`api_key_env`?`base_url_env`?`enable_real_generation`?`api_key` ? `base_url` ?????????????????????????? LLM????????????????? YAML ?????? query expansion ? citation-grounded answer generation?
+Primary configuration lives in `config/app.yaml`:
 
-## ???
+- `llm`: provider/model/API endpoint settings.
+- `embedding`: embedding provider and dimension.
+- `storage`: pgvector/local development storage backend.
+- `retrieval`: hybrid retrieval and ranking controls.
+- `guardrails`: evidence thresholds and retry policy.
 
-?? YAML ? PostgreSQL + pgvector ????schema ?? `database/pgvector_schema.sql`??? `pdf_chunks.embedding` ? `vector(1024)`?? PostgreSQL ??????????? local_dev/in-memory fallback ????????
+Use `.env.template` for local environment overrides.
