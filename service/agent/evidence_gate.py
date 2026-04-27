@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Sequence
+
+from service.agent.controlled_agents import EvidenceAuditAgent
 
 
 def _score(row: Dict[str, Any]) -> float:
@@ -155,6 +157,58 @@ class EvidenceGate:
             "table_evidence_count": table_count,
             "confidence": _confidence(rows),
         }
+
+
+class EvidenceDecisionEngine:
+    def __init__(
+        self,
+        llm_service: Any | None = None,
+        evidence_min_docs: int = 1,
+        evidence_min_top_score: float = 0.45,
+        evidence_min_avg_score: float = 0.30,
+        retry_limit: int = 2,
+        refuse_on_low_evidence: bool = True,
+    ) -> None:
+        self.retry_limit = max(0, int(retry_limit))
+        self.rule_gate = EvidenceGate(
+            evidence_min_docs=evidence_min_docs,
+            evidence_min_top_score=evidence_min_top_score,
+            evidence_min_avg_score=evidence_min_avg_score,
+            retry_limit=retry_limit,
+            refuse_on_low_evidence=refuse_on_low_evidence,
+        )
+        self.evidence_agent = EvidenceAuditAgent(llm_service)
+
+    async def evaluate(
+        self,
+        question: str,
+        query_type: str,
+        slots: Mapping[str, Any] | None,
+        selected_skill: str,
+        evidence: Sequence[Mapping[str, Any]],
+        rerank_trace: Mapping[str, Any] | None = None,
+        retry_count: int = 0,
+        table_evidence_quota: int = 2,
+        missing_slots: List[str] | None = None,
+    ) -> Dict[str, Any]:
+        rows = [dict(item) for item in evidence if isinstance(item, Mapping)]
+        rule_gate = self.rule_gate.evaluate(
+            rows,
+            query_type=query_type,
+            retry_count=retry_count,
+            table_evidence_quota=table_evidence_quota,
+            missing_slots=missing_slots,
+            slots=dict(slots or {}),
+        )
+        return await self.evidence_agent.decide_from_gate(
+            question=question,
+            query_type=query_type,
+            slots=slots,
+            selected_skill=selected_skill,
+            evidence=rows,
+            rule_gate=rule_gate,
+            rerank_trace=rerank_trace,
+        )
 
 
 def run_evidence_gate(
