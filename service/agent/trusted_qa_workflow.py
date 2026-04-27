@@ -1,17 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Dict, List
 from uuid import uuid4
 
 from service.agent.answer_generator import AnswerGenerator
 from service.agent.clarify_gate import build_clarify_question, find_missing_slots, required_slots_for_query_type
-from service.agent.controlled_agents import (
-    EvidenceAuditAgent,
-    IntentUnderstandingAgent,
-    SlotFillingAgent,
-    merge_audit_and_rule_gate,
-)
-from service.agent.evidence_gate import EvidenceGate
+from service.agent.controlled_agents import IntentUnderstandingAgent, SlotFillingAgent
+from service.agent.evidence_gate import EvidenceDecisionEngine
 from service.agent.query_expander import expand_queries
 from service.agent.skill_registry import DEFAULT_SKILL_REGISTRY
 from service.embedding.embedding_service import EmbeddingService, build_embedding_provider_from_config
@@ -40,7 +35,6 @@ class TrustedQAWorkflow:
         self.llm_service = get_llm_service()
         self.intent_agent = IntentUnderstandingAgent(self.llm_service)
         self.slot_agent = SlotFillingAgent(self.llm_service)
-        self.evidence_audit_agent = EvidenceAuditAgent(self.llm_service)
         self.embedding_service = EmbeddingService(provider=build_embedding_provider_from_config(self.config))
         self.retriever = HybridRetriever(
             ParallelQueryExecutor(
@@ -56,7 +50,8 @@ class TrustedQAWorkflow:
             ),
             table_evidence_quota=int(retrieval_cfg.get("table_evidence_quota", 2)),
         )
-        self.evidence_gate = EvidenceGate(
+        self.evidence_decision = EvidenceDecisionEngine(
+            llm_service=self.llm_service,
             evidence_min_docs=int(guard_cfg.get("evidence_min_docs", 1)),
             evidence_min_top_score=float(guard_cfg.get("evidence_min_top_score", 0.20)),
             evidence_min_avg_score=float(guard_cfg.get("evidence_min_avg_score", 0.10)),
@@ -152,31 +147,29 @@ class TrustedQAWorkflow:
         )
         evidence = list(retrieval_result.get("evidence") or [])
         observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
-        evidence_audit = await self.evidence_audit_agent.audit(
+        gate = await self.evidence_decision.evaluate(
             question=question,
             query_type=query_type,
             slots=slots,
             selected_skill=selected_skill.skill_name,
             evidence=evidence,
             rerank_trace=retrieval_result.get("rerank_trace") or {},
-        )
-        observations.append({"phase": "evidence_audit_agent", "audit": evidence_audit})
-        rule_gate = self.evidence_gate.evaluate(
-            evidence,
-            query_type=query_type,
             retry_count=0,
             table_evidence_quota=self.table_evidence_quota,
-            slots=slots,
         )
-        gate = merge_audit_and_rule_gate(rule_gate, evidence_audit)
-        observations.append({"phase": "evidence_gate", "rule_gate": rule_gate, "gate": gate})
+        observations.append(
+            {
+                "phase": "evidence_decision",
+                "rule_gate": gate.get("rule_gate") or {},
+                "audit": gate.get("evidence_audit") or {},
+                "gate": gate,
+            }
+        )
 
         retry_count = 0
-        while gate.get("decision") == "retry" and retry_count < self.evidence_gate.retry_limit:
+        while gate.get("decision") == "retry" and retry_count < self.evidence_decision.retry_limit:
             retry_count += 1
-            retry_question = str(gate.get("suggested_retry_query") or "").strip()
-            if not retry_question:
-                retry_question = question + " " + str(gate.get("reason", ""))
+            retry_question = str(gate.get("suggested_retry_query") or "").strip() or question
             retry_result = await self.retriever.retrieve(
                 question=retry_question,
                 collection_name=collection_name,
@@ -187,29 +180,23 @@ class TrustedQAWorkflow:
             )
             evidence = list(retry_result.get("evidence") or evidence)
             retrieval_result = retry_result
-            evidence_audit = await self.evidence_audit_agent.audit(
+            gate = await self.evidence_decision.evaluate(
                 question=question,
                 query_type=query_type,
                 slots=slots,
                 selected_skill=selected_skill.skill_name,
                 evidence=evidence,
                 rerank_trace=retrieval_result.get("rerank_trace") or {},
-            )
-            rule_gate = self.evidence_gate.evaluate(
-                evidence,
-                query_type=query_type,
                 retry_count=retry_count,
                 table_evidence_quota=self.table_evidence_quota,
-                slots=slots,
             )
-            gate = merge_audit_and_rule_gate(rule_gate, evidence_audit)
             observations.append(
                 {
                     "phase": "retry_retrieval",
                     "retry_count": retry_count,
                     "retry_question": retry_question,
-                    "audit": evidence_audit,
-                    "rule_gate": rule_gate,
+                    "audit": gate.get("evidence_audit") or {},
+                    "rule_gate": gate.get("rule_gate") or {},
                     "gate": gate,
                     "evidence_count": len(evidence),
                 }
@@ -337,5 +324,3 @@ _DEFAULT_WORKFLOW = TrustedQAWorkflow()
 
 def get_trusted_qa_workflow() -> TrustedQAWorkflow:
     return _DEFAULT_WORKFLOW
-
-

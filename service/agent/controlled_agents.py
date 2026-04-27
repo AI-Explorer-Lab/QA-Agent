@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -313,6 +313,127 @@ class EvidenceAuditAgent:
         if llm_audit is None:
             return fallback
         return self._normalize_audit(llm_audit, fallback=fallback)
+    async def decide_from_gate(
+        self,
+        question: str,
+        query_type: str,
+        slots: Mapping[str, Any] | None,
+        selected_skill: str,
+        evidence: Sequence[Mapping[str, Any]],
+        rule_gate: Mapping[str, Any] | None,
+        rerank_trace: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        gate_payload = dict(rule_gate or {})
+        audit = await self.audit(
+            question=question,
+            query_type=query_type,
+            slots=slots,
+            selected_skill=selected_skill,
+            evidence=evidence,
+            rerank_trace=rerank_trace,
+        )
+        audit_payload = self._normalize_audit(audit)
+        gate_decision = _clean_str(gate_payload.get("decision") or "refuse").lower()
+        if gate_decision not in DECISION_RANK:
+            gate_decision = "refuse"
+
+        result = dict(gate_payload)
+        result["rule_gate"] = gate_payload
+        result["evidence_audit"] = audit_payload
+        result.setdefault("reason", gate_payload.get("reason") or audit_payload.get("reason") or gate_decision)
+        if audit_payload.get("missing_aspects"):
+            result["missing_aspects"] = _clean_list(audit_payload.get("missing_aspects"))
+
+        if gate_decision in {"clarify", "refuse"}:
+            result["decision"] = gate_decision
+            if gate_decision == "clarify":
+                result["clarify_question"] = _clean_str(
+                    gate_payload.get("clarify_question")
+                    or audit_payload.get("clarify_question")
+                    or result.get("clarify_question")
+                )
+            result["reason"] = _clean_str(gate_payload.get("reason") or result.get("reason") or audit_payload.get("reason"))
+            result["suggested_retry_query"] = ""
+            return result
+
+        final_decision = gate_decision
+        if gate_decision == "answer" and DECISION_RANK[audit_payload["semantic_decision"]] > DECISION_RANK[gate_decision]:
+            final_decision = audit_payload["semantic_decision"]
+
+        result["decision"] = final_decision
+        if final_decision == "answer":
+            result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "evidence_passed")
+            result["suggested_retry_query"] = ""
+            return result
+
+        if final_decision == "clarify":
+            result["reason"] = _clean_str(audit_payload.get("reason") or gate_payload.get("reason") or "clarify")
+            result["clarify_question"] = _clean_str(
+                gate_payload.get("clarify_question")
+                or audit_payload.get("clarify_question")
+                or result.get("clarify_question")
+            )
+            result["suggested_retry_query"] = ""
+            return result
+
+        if final_decision == "refuse":
+            result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "refuse")
+            result["suggested_retry_query"] = ""
+            return result
+
+        result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "retry")
+        result["suggested_retry_query"] = self._build_retry_query_from_gate(
+            question=question,
+            query_type=query_type,
+            slots=slots,
+            rule_gate=gate_payload,
+            audit=audit_payload,
+        )
+        return result
+
+    @staticmethod
+    def _build_retry_query_from_gate(
+        question: str,
+        query_type: str,
+        slots: Mapping[str, Any] | None,
+        rule_gate: Mapping[str, Any] | None,
+        audit: Mapping[str, Any] | None,
+    ) -> str:
+        slot_values = _normalize_slots(slots)
+        gate_reason = _clean_str((rule_gate or {}).get("reason"))
+        audit_payload = EvidenceAuditAgent._normalize_audit(audit or {})
+        missing_aspects = [item.lower() for item in _clean_list(audit_payload.get("missing_aspects"))]
+        current = _clean_str(audit_payload.get("suggested_retry_query"))
+
+        parts: List[str] = []
+        if current and not any(token in current for token in ["missing_", "_after_retry", "low_score", "no_evidence"]):
+            parts.append(current)
+
+        if query_type == "table_qa":
+            parts.extend([slot_values.get("period") or (slot_values.get("years") or [""])[0], slot_values.get("metric") or "", "table"])
+            if "table_evidence" in missing_aspects or "missing_table_evidence" in gate_reason:
+                parts.extend(["metric", "value", "unit"])
+        elif query_type == "multi_doc_compare":
+            parts.extend((slot_values.get("compare_targets") or [])[:3])
+            parts.extend([slot_values.get("scope") or "", "compare"])
+        elif query_type == "citation_locate":
+            parts.extend([slot_values.get("target_statement") or "", "source", "page"])
+        elif query_type in {"summarization", "report_generation"}:
+            parts.extend([slot_values.get("scope") or "", "summary" if query_type == "summarization" else "report"])
+        else:
+            parts.append(question)
+
+        if not parts or all(not _clean_str(part) for part in parts):
+            parts.append(question)
+
+        deduped: List[str] = []
+        for item in parts:
+            text = _clean_str(item)
+            if text and text not in deduped:
+                deduped.append(text)
+
+        return " ".join(deduped) if deduped else question
+
 
     async def _audit_with_llm(
         self,

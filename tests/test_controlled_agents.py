@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import unittest
@@ -43,6 +43,24 @@ class ControlledAgentsTestCase(unittest.TestCase):
         self.assertEqual(audit["semantic_decision"], "retry")
         self.assertIn("table_evidence", audit["missing_aspects"])
         self.assertEqual(audit["evidence_coverage"], "partial")
+
+    def test_gate_driven_decision_agent_consumes_retry_reason(self):
+        result = asyncio.run(
+            EvidenceAuditAgent().decide_from_gate(
+                question="What was 2025 revenue?",
+                query_type="table_qa",
+                slots={"years": ["2025"], "metric": "revenue", "period": "2025"},
+                selected_skill="TableQASkill",
+                evidence=[{"content": "2025 net profit was 10.", "chunk_type": "text", "final_score": 0.9}],
+                rule_gate={"decision": "retry", "reason": "missing_table_evidence", "confidence": 0.4},
+                rerank_trace={},
+            )
+        )
+
+        self.assertEqual(result["decision"], "retry")
+        self.assertEqual(result["rule_gate"]["reason"], "missing_table_evidence")
+        self.assertIn("table", result["suggested_retry_query"].lower())
+        self.assertNotIn("missing_table_evidence", result["suggested_retry_query"])
 
     def test_merge_audit_and_rule_gate_is_conservative(self):
         merged = merge_audit_and_rule_gate(

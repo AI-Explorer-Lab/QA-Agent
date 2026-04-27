@@ -1,4 +1,5 @@
-﻿import sys
+﻿import asyncio
+import sys
 import unittest
 from pathlib import Path
 
@@ -6,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from service.agent.evidence_gate import run_evidence_gate
+from service.agent.evidence_gate import EvidenceDecisionEngine, run_evidence_gate
 
 
 def _mock_evidence(chunk_type: str = "text", score: float = 0.9, doc_source: str = "doc_a.pdf"):
@@ -79,6 +80,26 @@ class EvidenceGateTestCase(unittest.TestCase):
             retry_limit=2,
         )
         self.assertIn(result["decision"], {"clarify", "refuse"})
+
+    def test_unified_engine_generates_natural_retry_query(self):
+        result = asyncio.run(
+            EvidenceDecisionEngine(retry_limit=2).evaluate(
+                question="What was 2025 revenue?",
+                query_type="table_qa",
+                slots={"years": ["2025"], "metric": "revenue", "period": "2025"},
+                selected_skill="TableQASkill",
+                evidence=[{"content": "2025 net profit was 10.", "chunk_type": "text", "final_score": 0.9}],
+                rerank_trace={},
+                retry_count=0,
+                table_evidence_quota=1,
+            )
+        )
+
+        self.assertEqual(result["decision"], "retry")
+        self.assertIn("2025", result["suggested_retry_query"])
+        self.assertIn("revenue", result["suggested_retry_query"].lower())
+        self.assertIn("table", result["suggested_retry_query"].lower())
+        self.assertNotIn("missing_table_evidence", result["suggested_retry_query"])
 
 
 if __name__ == "__main__":
