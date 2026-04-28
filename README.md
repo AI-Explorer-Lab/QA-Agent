@@ -28,8 +28,6 @@ main.py
   -> service.pdf / service.agent.trusted_qa_workflow / service.retrieval
 ```
 
-The old LangGraph, llm_chat, llm_query, llm_rag, and react-ask implementation has been removed from the runtime tree.
-
 ## Run
 
 ```bash
