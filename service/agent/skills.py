@@ -134,7 +134,7 @@ MultiDocCompareSkill = SkillDefinition(
 )
 
 
-ALL_SKILLS = (
++ALL_SKILLS = (
     FactLookupSkill,
     TableQASkill,
     CitationLocateSkill,

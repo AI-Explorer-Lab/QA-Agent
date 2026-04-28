@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, Type
 
 from service.agent.clarify_gate import extract_slots
 from service.agent.query_classifier import (
@@ -15,6 +15,14 @@ from service.agent.query_classifier import (
 )
 from service.agent.schemas import QUERY_TYPE_SET, normalize_query_type
 from utils.content_normalizer import normalize_whitespace
+
+try:
+    from pydantic import BaseModel, Field
+except Exception:
+    BaseModel = object  # type: ignore[assignment]
+
+    def Field(default: Any = None, **_: Any) -> Any:  # type: ignore[override]
+        return default
 
 EXTRA_TABLE_HINTS = {"revenue", "profit", "gross margin", "cash flow", "cost", "budget", "kpi", "metric", "data", "value"}
 
@@ -55,6 +63,31 @@ YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
+class IntentClassificationSchema(BaseModel):
+    query_type: str
+    matched_keyword_group: str = ""
+    intent: str = ""
+    reason: str = ""
+
+
+class SlotFillSchema(BaseModel):
+    years: List[str] = Field(default_factory=list)
+    metric: str = ""
+    period: str = ""
+    target_statement: str = ""
+    compare_targets: List[str] = Field(default_factory=list)
+    scope: str = ""
+
+
+class EvidenceAuditSchema(BaseModel):
+    semantic_decision: str = "retry"
+    missing_aspects: List[str] = Field(default_factory=list)
+    evidence_coverage: str = "partial"
+    conflict_detected: bool = False
+    suggested_retry_query: str = ""
+    reason: str = ""
+
+
 def _extract_json_object(text: str) -> Dict[str, Any] | None:
     raw = str(text or "").strip()
     if not raw:
@@ -76,7 +109,7 @@ def _extract_json_object(text: str) -> Dict[str, Any] | None:
 
 
 async def _safe_complete(llm_service: Any, system_prompt: str, user_prompt: str, max_tokens: int = 400) -> Dict[str, Any] | None:
-    if llm_service is None or not bool(getattr(llm_service, "is_available", False)):
+    if llm_service is None:
         return None
     complete = getattr(llm_service, "complete", None)
     if complete is None:
@@ -87,6 +120,38 @@ async def _safe_complete(llm_service: Any, system_prompt: str, user_prompt: str,
         return None
     return _extract_json_object(content or "")
 
+
+async def _safe_structured_json(
+    llm_service: Any,
+    system_prompt: str,
+    user_payload: Any,
+    schema: Type[Any],
+    max_tokens: int = 400,
+) -> Dict[str, Any] | None:
+    if llm_service is None:
+        return None
+
+    structured_json = getattr(llm_service, "structured_json", None)
+    if callable(structured_json):
+        try:
+            payload = await structured_json(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                schema=schema,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            payload = None
+
+        if hasattr(payload, "model_dump"):
+            payload = payload.model_dump()
+        elif hasattr(payload, "dict"):
+            payload = payload.dict()
+        if isinstance(payload, Mapping):
+            return dict(payload)
+
+    user_prompt = user_payload if isinstance(user_payload, str) else json.dumps(user_payload, ensure_ascii=False)
+    return await _safe_complete(llm_service, system_prompt, user_prompt, max_tokens=max_tokens)
 
 def _clean_str(value: Any) -> str:
     return normalize_whitespace(str(value or ""), preserve_newlines=False)
@@ -193,23 +258,21 @@ class IntentUnderstandingAgent:
 
     async def _classify_with_llm(self, question: str) -> Dict[str, Any] | None:
         groups = {key: sorted(values) for key, values in INTENT_KEYWORD_GROUPS.items()}
-        parsed = await _safe_complete(
+        parsed = await _safe_structured_json(
             self.llm_service,
             "Classify the user intent into exactly one allowed query_type. Return only JSON.",
-            json.dumps(
-                {
-                    "question": question,
-                    "allowed_query_types": sorted(QUERY_TYPE_SET),
-                    "keyword_groups": groups,
-                    "schema": {
-                        "query_type": "one allowed query type",
-                        "matched_keyword_group": "keyword group name",
-                        "intent": "short snake_case intent",
-                        "reason": "brief reason",
-                    },
+            {
+                "question": question,
+                "allowed_query_types": sorted(QUERY_TYPE_SET),
+                "keyword_groups": groups,
+                "schema": {
+                    "query_type": "one allowed query type",
+                    "matched_keyword_group": "keyword group name",
+                    "intent": "short snake_case intent",
+                    "reason": "brief reason",
                 },
-                ensure_ascii=False,
-            ),
+            },
+            schema=IntentClassificationSchema,
             max_tokens=360,
         )
         if not parsed:
@@ -275,19 +338,17 @@ class SlotFillingAgent:
         return slots
 
     async def _fill_with_llm(self, question: str, query_type: str, rule_slots: Mapping[str, Any]) -> Dict[str, Any] | None:
-        parsed = await _safe_complete(
+        parsed = await _safe_structured_json(
             self.llm_service,
             "Extract slots from the user question. Return only JSON with the fixed schema.",
-            json.dumps(
-                {
-                    "question": question,
-                    "query_type": query_type,
-                    "fixed_schema": {key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
-                    "rule_slots": dict(rule_slots),
-                    "instructions": "Do not add new fields. Use empty strings or empty lists when absent.",
-                },
-                ensure_ascii=False,
-            ),
+            {
+                "question": question,
+                "query_type": query_type,
+                "fixed_schema": {key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
+                "rule_slots": dict(rule_slots),
+                "instructions": "Do not add new fields. Use empty strings or empty lists when absent.",
+            },
+            schema=SlotFillSchema,
             max_tokens=500,
         )
         if not parsed:
@@ -455,28 +516,26 @@ class EvidenceAuditAgent:
                     "score": item.get("final_score") or item.get("score"),
                 }
             )
-        parsed = await _safe_complete(
+        parsed = await _safe_structured_json(
             self.llm_service,
             "Audit whether the retrieved evidence semantically covers the question. Return only JSON.",
-            json.dumps(
-                {
-                    "question": question,
-                    "query_type": query_type,
-                    "slots": dict(slots or {}),
-                    "selected_skill": selected_skill,
-                    "evidence": evidence_brief,
-                    "rerank_trace": dict(rerank_trace or {}),
-                    "schema": {
-                        "semantic_decision": "answer | retry | clarify | refuse",
-                        "missing_aspects": [],
-                        "evidence_coverage": "sufficient | partial | poor",
-                        "conflict_detected": False,
-                        "suggested_retry_query": "",
-                        "reason": "",
-                    },
+            {
+                "question": question,
+                "query_type": query_type,
+                "slots": dict(slots or {}),
+                "selected_skill": selected_skill,
+                "evidence": evidence_brief,
+                "rerank_trace": dict(rerank_trace or {}),
+                "schema": {
+                    "semantic_decision": "answer | retry | clarify | refuse",
+                    "missing_aspects": [],
+                    "evidence_coverage": "sufficient | partial | poor",
+                    "conflict_detected": False,
+                    "suggested_retry_query": "",
+                    "reason": "",
                 },
-                ensure_ascii=False,
-            ),
+            },
+            schema=EvidenceAuditSchema,
             max_tokens=600,
         )
         return parsed
@@ -606,3 +665,4 @@ def merge_audit_and_rule_gate(rule_gate: Mapping[str, Any], audit: Mapping[str, 
     if audit_payload.get("missing_aspects"):
         merged.setdefault("missing_aspects", audit_payload["missing_aspects"])
     return merged
+

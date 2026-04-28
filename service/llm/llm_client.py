@@ -4,7 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 from utils.config_loader import get_app_config
 
@@ -22,6 +22,21 @@ try:
     from openai import AsyncOpenAI
 except Exception:
     AsyncOpenAI = None
+
+try:
+    from pydantic import BaseModel
+except Exception:
+    BaseModel = object  # type: ignore[assignment]
+
+try:
+    from langchain_core.prompts import ChatPromptTemplate
+except Exception:
+    ChatPromptTemplate = None
+
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:
+    ChatOpenAI = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +83,26 @@ def _extract_json_array(text: str) -> Optional[List[str]]:
         except Exception:
             return None
     return None
+
+
+def _extract_json_object(text: str) -> Dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _load_legacy_llm_config() -> Dict[str, Any]:
@@ -204,6 +239,7 @@ class LLMService:
 
         self._install_proxy(provider_cfg)
         self._client = None
+        self._langchain_client = None
         self.last_error = ""
         self.last_call_mode = ""
         self.call_attempt_count = 0
@@ -222,6 +258,10 @@ class LLMService:
     def is_available(self) -> bool:
         return bool(self.enabled and self.api_key and AsyncOpenAI is not None)
 
+    @property
+    def langchain_available(self) -> bool:
+        return bool(self.enabled and self.api_key and ChatPromptTemplate is not None and ChatOpenAI is not None)
+
     def trace_metadata(self) -> Dict[str, Any]:
         return {
             "enabled": self.enabled,
@@ -230,6 +270,7 @@ class LLMService:
             "model": self.model,
             "base_url_set": bool(self.base_url),
             "use_responses_api": self.use_responses_api,
+            "langchain_available": self.langchain_available,
             "call_attempt_count": self.call_attempt_count,
             "last_call_mode": self.last_call_mode,
             "last_error": self.last_error,
@@ -251,7 +292,81 @@ class LLMService:
             self._client = AsyncOpenAI(**kwargs)
         return self._client
 
+    def _langchain_client_instance(self):
+        if not self.langchain_available:
+            return None
+        if self._langchain_client is None:
+            kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "temperature": self.temperature,
+                "api_key": self.api_key,
+                "timeout": self.timeout_seconds,
+            }
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._langchain_client = ChatOpenAI(**kwargs)
+        return self._langchain_client
+
+    async def structured_json(
+        self,
+        system_prompt: str,
+        user_payload: Any,
+        schema: Type[Any],
+        max_tokens: int = 512,
+    ) -> Optional[Dict[str, Any]]:
+        user_prompt = user_payload if isinstance(user_payload, str) else json.dumps(user_payload, ensure_ascii=False)
+        if self.langchain_available:
+            model = self._langchain_client_instance()
+            if model is not None:
+                self.call_attempt_count += 1
+                try:
+                    self.last_call_mode = "langchain.structured_output"
+                    prompt = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", "{system_prompt}"),
+                            ("user", "{user_prompt}"),
+                        ]
+                    )
+                    messages = prompt.format_messages(system_prompt=system_prompt, user_prompt=user_prompt)
+                    runnable = model.with_structured_output(schema)
+                    result = await runnable.ainvoke(messages)
+                    self.last_error = ""
+                    if hasattr(result, "model_dump"):
+                        return result.model_dump()
+                    if isinstance(result, dict):
+                        return result
+                    if hasattr(result, "dict"):
+                        return result.dict()
+                except Exception as error:
+                    self.last_error = "langchain.structured_output " + _safe_error(error, self.api_key)
+
+        content = await self.complete(system_prompt, user_prompt, max_tokens=max_tokens)
+        return _extract_json_object(content or "")
+
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+        if self.langchain_available:
+            model = self._langchain_client_instance()
+            if model is not None:
+                self.call_attempt_count += 1
+                try:
+                    self.last_call_mode = "langchain.chat"
+                    prompt = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", "{system_prompt}"),
+                            ("user", "{user_prompt}"),
+                        ]
+                    )
+                    chain = prompt | model
+                    response = await chain.ainvoke({"system_prompt": system_prompt, "user_prompt": user_prompt})
+                    content = getattr(response, "content", response)
+                    if isinstance(content, list):
+                        content = "\n".join(str(part) for part in content if str(part).strip())
+                    if isinstance(content, str) and content.strip():
+                        self.last_error = ""
+                        return content.strip()
+                except Exception as error:
+                    self.last_error = "langchain.chat " + _safe_error(error, self.api_key)
+
         client = self._client_instance()
         if client is None:
             return None
@@ -302,7 +417,7 @@ class LLMService:
         return None
 
     async def expand_queries(self, question: str, query_type: str, expand_query_num: int) -> Optional[List[str]]:
-        if not self.is_available:
+        if not (self.is_available or self.langchain_available):
             self._client_instance()
             return None
         total = max(1, int(expand_query_num))
@@ -336,7 +451,7 @@ class LLMService:
         evidence: List[Dict[str, Any]],
         citations: List[Dict[str, Any]],
     ) -> Optional[str]:
-        if not self.is_available or not evidence:
+        if not (self.is_available or self.langchain_available) or not evidence:
             self._client_instance()
             return None
         evidence_lines = []
@@ -371,4 +486,3 @@ def get_llm_service() -> LLMService:
     if _DEFAULT_LLM_SERVICE is None:
         _DEFAULT_LLM_SERVICE = LLMService()
     return _DEFAULT_LLM_SERVICE
-

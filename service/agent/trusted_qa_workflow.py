@@ -1,6 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Any, Dict, List
+import os
+from contextvars import ContextVar
+
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from service.agent.answer_generator import AnswerGenerator
@@ -18,6 +21,21 @@ from service.retrieval.retrieval_cache import RetrievalResultCache
 from service.retrieval.runtime import get_runtime_repository
 from service.session.session_service import get_session_service
 from utils.config_loader import get_app_config
+
+try:
+    from langgraph.graph import StateGraph
+except Exception:
+    StateGraph = None
+
+
+_LANGGRAPH_BYPASS: ContextVar[bool] = ContextVar("trusted_qa_langgraph_bypass", default=False)
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _query_expander_for_executor(question: str, expand_query_num: int) -> List[str]:
@@ -60,6 +78,94 @@ class TrustedQAWorkflow:
         )
         self.answer_generator = AnswerGenerator()
         self.table_evidence_quota = int(retrieval_cfg.get("table_evidence_quota", 2))
+        workflow_cfg = self.config.get("workflow", {}) if isinstance(self.config.get("workflow"), dict) else {}
+        self.langgraph_enabled = _env_truthy(
+            "TRUSTED_QA_ENABLE_LANGGRAPH",
+            bool(workflow_cfg.get("enable_langgraph", False)),
+        )
+        self.langgraph_available = StateGraph is not None
+        self._langgraph_app: Optional[Any] = None
+
+    def _langgraph_app_instance(self) -> Optional[Any]:
+        if not self.langgraph_available:
+            return None
+        if self._langgraph_app is not None:
+            return self._langgraph_app
+
+        graph = StateGraph(dict)
+
+        async def run_linear(state: Dict[str, Any]) -> Dict[str, Any]:
+            token = _LANGGRAPH_BYPASS.set(True)
+            try:
+                response = await self.ask(
+                    question=str(state.get("question") or ""),
+                    collection_name=str(state.get("collection_name") or "default"),
+                    session_id=state.get("session_id"),
+                    top_k=int(state.get("top_k") or 5),
+                    expand_query_num=int(state.get("expand_query_num") or 3),
+                    enable_cache=bool(state.get("enable_cache", True)),
+                )
+            finally:
+                _LANGGRAPH_BYPASS.reset(token)
+            trace = response.get("retrieval_trace") if isinstance(response, dict) else None
+            if isinstance(trace, dict):
+                trace["workflow_runner"] = "langgraph"
+            return {"response": response}
+
+        graph.add_node("run_linear", run_linear)
+        graph.set_entry_point("run_linear")
+        graph.set_finish_point("run_linear")
+        self._langgraph_app = graph.compile()
+        return self._langgraph_app
+
+    async def _ask_with_langgraph(
+        self,
+        question: str,
+        collection_name: str,
+        session_id: str | None,
+        top_k: int,
+        expand_query_num: int,
+        enable_cache: bool,
+    ) -> Optional[Dict[str, Any]]:
+        app = self._langgraph_app_instance()
+        if app is None:
+            return None
+        result = await app.ainvoke(
+            {
+                "question": question,
+                "collection_name": collection_name,
+                "session_id": session_id,
+                "top_k": top_k,
+                "expand_query_num": expand_query_num,
+                "enable_cache": enable_cache,
+            }
+        )
+        if isinstance(result, dict) and isinstance(result.get("response"), dict):
+            return result.get("response")
+        return None
+
+    async def _maybe_run_langgraph(
+        self,
+        question: str,
+        collection_name: str,
+        session_id: str | None,
+        top_k: int,
+        expand_query_num: int,
+        enable_cache: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.langgraph_enabled or not self.langgraph_available or _LANGGRAPH_BYPASS.get():
+            return None
+        try:
+            return await self._ask_with_langgraph(
+                question=question,
+                collection_name=collection_name,
+                session_id=session_id,
+                top_k=top_k,
+                expand_query_num=expand_query_num,
+                enable_cache=enable_cache,
+            )
+        except Exception:
+            return None
 
     async def ask(
         self,
@@ -70,6 +176,17 @@ class TrustedQAWorkflow:
         expand_query_num: int = 3,
         enable_cache: bool = True,
     ) -> Dict[str, Any]:
+        langgraph_response = await self._maybe_run_langgraph(
+            question=question,
+            collection_name=collection_name,
+            session_id=session_id,
+            top_k=top_k,
+            expand_query_num=expand_query_num,
+            enable_cache=enable_cache,
+        )
+        if isinstance(langgraph_response, dict):
+            return langgraph_response
+
         session = self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
         intent_trace = await self.intent_agent.classify(question)
@@ -129,6 +246,7 @@ class TrustedQAWorkflow:
                 }
             )
             response["retrieval_trace"]["llm"] = llm_trace
+            response["retrieval_trace"].setdefault("workflow_runner", "python")
             self._save(sid, question, response)
             return response
 
@@ -249,6 +367,7 @@ class TrustedQAWorkflow:
             }
         )
         response["retrieval_trace"]["llm"] = llm_trace
+        response["retrieval_trace"].setdefault("workflow_runner", "python")
         response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
         response["skill_trace"]["intent_trace"] = intent_trace
         response["skill_trace"]["slots"] = slots
@@ -324,3 +443,4 @@ _DEFAULT_WORKFLOW = TrustedQAWorkflow()
 
 def get_trusted_qa_workflow() -> TrustedQAWorkflow:
     return _DEFAULT_WORKFLOW
+
