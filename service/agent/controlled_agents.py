@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -14,6 +14,7 @@ from service.agent.query_classifier import (
     classify_query_type,
 )
 from service.agent.schemas import QUERY_TYPE_SET, normalize_query_type
+from service.agent.skills import SkillDefinition
 from utils.content_normalizer import normalize_whitespace
 
 try:
@@ -56,7 +57,7 @@ INTENT_NAMES = {
     "ambiguous_query": "clarify_ambiguous_query",
 }
 
-SLOT_KEYS = ("years", "metric", "period", "target_statement", "compare_targets", "scope")
+SLOT_KEYS = ("years", "metric", "period", "target_statement", "compare_targets", "scope", "table_name", "unit", "focus")
 FINAL_AUDIT_DECISIONS = {"answer", "retry", "clarify", "refuse"}
 DECISION_RANK = {"answer": 0, "retry": 1, "clarify": 2, "refuse": 3}
 YEAR_RE = re.compile(r"(?:19|20)\d{2}")
@@ -77,6 +78,9 @@ class SlotFillSchema(BaseModel):
     target_statement: str = ""
     compare_targets: List[str] = Field(default_factory=list)
     scope: str = ""
+    table_name: str = ""
+    unit: str = ""
+    focus: str = ""
 
 
 class EvidenceAuditSchema(BaseModel):
@@ -184,6 +188,9 @@ def _normalize_slots(slots: Mapping[str, Any] | None) -> Dict[str, Any]:
         "target_statement": _clean_str(payload.get("target_statement")),
         "compare_targets": _clean_list(payload.get("compare_targets")),
         "scope": _clean_str(payload.get("scope")),
+        "table_name": _clean_str(payload.get("table_name")),
+        "unit": _clean_str(payload.get("unit")),
+        "focus": _clean_str(payload.get("focus")),
     }
     if not normalized["years"] and normalized["period"]:
         normalized["years"] = YEAR_RE.findall(normalized["period"])
@@ -317,36 +324,53 @@ class SlotFillingAgent:
     def __init__(self, llm_service: Any | None = None) -> None:
         self.llm_service = llm_service
 
-    async def fill(self, question: str, query_type: str) -> Dict[str, Any]:
-        rule_slots = self._rule_slots(question, query_type)
-        llm_slots = await self._fill_with_llm(question, query_type, rule_slots)
-        return _merge_slots(rule_slots, llm_slots)
+    async def fill(self, question: str, query_type: str, skill: SkillDefinition | None = None) -> Dict[str, Any]:
+        rule_slots = self._rule_slots(question, query_type, skill)
+        llm_slots = await self._fill_with_llm(question, query_type, rule_slots, skill)
+        merged = _merge_slots(rule_slots, llm_slots)
+        if skill is not None:
+            merged["__skill_name__"] = skill.skill_name
+            merged["__missing_required__"] = skill.get_missing_slots(merged)
+        return merged
 
-    def _rule_slots(self, question: str, query_type: str) -> Dict[str, Any]:
+    def _rule_slots(self, question: str, query_type: str, skill: SkillDefinition | None = None) -> Dict[str, Any]:
+        del skill
         slots = _normalize_slots(extract_slots(question, query_type))
         years = YEAR_RE.findall(question or "")
         if years:
             slots["years"] = years
             if not slots["period"] or slots["period"] not in years:
                 slots["period"] = years[0]
+        lowered = _clean_str(question).lower()
         if not slots["metric"]:
-            lowered = _clean_str(question).lower()
             for hint in sorted(EXTRA_TABLE_HINTS, key=len, reverse=True):
                 if hint in lowered:
                     slots["metric"] = hint
                     break
+        if not slots["table_name"] and "利润表" in question:
+            slots["table_name"] = "利润表"
+        if not slots["focus"] and any(token in question for token in ("总结", "概括", "分析", "报告")):
+            slots["focus"] = "summary"
         return slots
 
-    async def _fill_with_llm(self, question: str, query_type: str, rule_slots: Mapping[str, Any]) -> Dict[str, Any] | None:
+    async def _fill_with_llm(
+        self,
+        question: str,
+        query_type: str,
+        rule_slots: Mapping[str, Any],
+        skill: SkillDefinition | None = None,
+    ) -> Dict[str, Any] | None:
+        skill_payload = skill.package_metadata() if skill is not None else {}
         parsed = await _safe_structured_json(
             self.llm_service,
-            "Extract slots from the user question. Return only JSON with the fixed schema.",
+            "Extract slots from the user question. Return only JSON with the schema required by the selected skill package.",
             {
                 "question": question,
                 "query_type": query_type,
+                "skill_package": skill_payload,
                 "fixed_schema": {key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
                 "rule_slots": dict(rule_slots),
-                "instructions": "Do not add new fields. Use empty strings or empty lists when absent.",
+                "instructions": "Respect the selected skill package slot schema. Do not add new fields. Use empty strings or empty lists when absent.",
             },
             schema=SlotFillSchema,
             max_tokens=500,
@@ -665,4 +689,7 @@ def merge_audit_and_rule_gate(rule_gate: Mapping[str, Any], audit: Mapping[str, 
     if audit_payload.get("missing_aspects"):
         merged.setdefault("missing_aspects", audit_payload["missing_aspects"])
     return merged
+
+
+
 

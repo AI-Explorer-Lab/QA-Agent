@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from service.agent.answer_generator import AnswerGenerator
-from service.agent.clarify_gate import build_clarify_question, find_missing_slots, required_slots_for_query_type
+from service.agent.clarify_gate import build_clarify_question
 from service.agent.controlled_agents import IntentUnderstandingAgent, SlotFillingAgent
 from service.agent.evidence_gate import EvidenceDecisionEngine
 from service.agent.query_expander import expand_queries
@@ -192,9 +192,9 @@ class TrustedQAWorkflow:
         intent_trace = await self.intent_agent.classify(question)
         query_type = str(intent_trace.get("query_type") or "fact_lookup")
         selected_skill = self.skill_registry.select_skill(query_type)
-        slots = await self.slot_agent.fill(question, query_type)
-        required_slots = required_slots_for_query_type(query_type)
-        missing_slots = find_missing_slots(slots, required_slots)
+        slots = await self.slot_agent.fill(question, query_type, selected_skill)
+        missing_slots = selected_skill.get_missing_slots(slots)
+        skill_package = selected_skill.package_metadata()
         if not str(collection_name or "").strip():
             missing_slots.append("collection_name")
         clarify = {
@@ -206,7 +206,7 @@ class TrustedQAWorkflow:
         observations: List[Dict[str, Any]] = [
             {"phase": "load_session", "session_id": sid},
             {"phase": "intent_understanding_agent", "intent": intent_trace},
-            {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name},
+            {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package},
             {"phase": "slot_filling_agent", "slots": slots, "missing_slots": missing_slots},
         ]
 
@@ -235,9 +235,11 @@ class TrustedQAWorkflow:
             )
             response["answer"] = clarify.get("clarify_question") or response["answer"]
             response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
+            response["skill_trace"]["skill_package"] = skill_package
             response["skill_trace"]["intent_trace"] = intent_trace
             response["skill_trace"]["slots"] = slots
             response["retrieval_trace"]["tool_chain"] = response["skill_trace"]["tool_chain"]
+            response["retrieval_trace"]["skill_package"] = skill_package
             llm_trace = self.llm_service.trace_metadata()
             llm_trace.update(
                 {
@@ -369,10 +371,12 @@ class TrustedQAWorkflow:
         response["retrieval_trace"]["llm"] = llm_trace
         response["retrieval_trace"].setdefault("workflow_runner", "python")
         response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
+        response["skill_trace"]["skill_package"] = skill_package
         response["skill_trace"]["intent_trace"] = intent_trace
         response["skill_trace"]["slots"] = slots
         response["skill_trace"]["evidence_audit"] = gate.get("evidence_audit", {})
         response["retrieval_trace"]["tool_chain"] = response["skill_trace"]["tool_chain"]
+        response["retrieval_trace"]["skill_package"] = skill_package
         response["retrieval_trace"]["intent_trace"] = intent_trace
         response["retrieval_trace"]["slots"] = slots
         response["retrieval_trace"]["evidence_audit"] = gate.get("evidence_audit", {})
