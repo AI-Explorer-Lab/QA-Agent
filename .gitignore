@@ -26,3 +26,4 @@ tmp_pip_proxy/
 .vendor/
 .pytest_cache/
 .tmp_pytest_workspace/
+*.md
