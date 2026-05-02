@@ -1,7 +1,27 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SKILL_DIR = REPO_ROOT / "skills"
+_MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
+_SECTION_RE = re.compile(r"^##\s+([^\n]+)\n(.*?)(?=^##\s+|\Z)", re.MULTILINE | re.DOTALL)
+_REQUIRED_METADATA_FIELDS: Tuple[str, ...] = (
+    "skill_name",
+    "query_types",
+    "required_slots",
+    "tool_chain",
+    "guardrails",
+    "slot_schema",
+    "execution_config",
+    "few_shot_examples",
+    "tool_constraints",
+)
 
 
 @dataclass(frozen=True)
@@ -63,211 +83,114 @@ class SkillDefinition:
         }
 
 
-FactLookupSkill = SkillDefinition(
-    skill_name="FactLookupSkill",
-    query_types=("fact_lookup",),
-    required_slots=tuple(),
-    input_schema={"question": "str", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"refuse_on_low_evidence": True},
-    trace_fields=("selected_skill", "tool_chain", "observations", "gate_decision"),
-    package=SkillPackage(
-        task_description="Answer precise fact lookup questions grounded in retrieved evidence.",
-        prompt_template=(
-            "You are the FactLookup skill. Return concise, citation-grounded factual answers. "
-            "If evidence is insufficient, trigger conservative decisioning."
-        ),
-        few_shot_examples=(
-            {
-                "question": "What is the registered capital of Company A?",
-                "answer_style": "single-fact with citation",
-            },
-        ),
-        slot_schema={"required": [], "optional": ["scope", "entity"]},
-        tool_constraints={"allowed_tools": ["query_expander", "retriever", "reranker", "answer_generator"]},
-        execution_config={"max_iterations": 1, "retry_on_low_evidence": True},
-    ),
-)
-
-TableQASkill = SkillDefinition(
-    skill_name="TableQASkill",
-    query_types=("table_qa",),
-    required_slots=("metric", "period"),
-    input_schema={"question": "str", "metric": "str", "period": "str", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "table_prioritized_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"table_evidence_quota": 2},
-    trace_fields=("selected_skill", "tool_chain", "observations", "table_evidence_count"),
-    package=SkillPackage(
-        task_description="Answer table-centric numerical questions with strong table evidence coverage.",
-        prompt_template=(
-            "You are the TableQA skill. Prioritize table rows/cells, preserve period and metric alignment, "
-            "and include units when available."
-        ),
-        few_shot_examples=(
-            {
-                "question": "What was 2025 revenue?",
-                "expected_slots": {"metric": "revenue", "period": "2025"},
-            },
-        ),
-        slot_schema={"required": ["metric", "period"], "optional": ["unit", "scope", "table_name"]},
-        tool_constraints={"must_include_table_evidence": True, "minimum_table_chunks": 2},
-        execution_config={"table_priority": "high", "retry_with_table_terms": True},
-    ),
-)
-
-CitationLocateSkill = SkillDefinition(
-    skill_name="CitationLocateSkill",
-    query_types=("citation_locate",),
-    required_slots=("target_statement",),
-    input_schema={"question": "str", "target_statement": "str", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"require_snippet": True},
-    trace_fields=("selected_skill", "tool_chain", "observations", "citation_locations"),
-    package=SkillPackage(
-        task_description="Locate source citations for a target statement and return traceable evidence snippets.",
-        prompt_template=(
-            "You are the CitationLocate skill. Find source-aligned snippets and return citation spans with "
-            "high precision."
-        ),
-        few_shot_examples=(
-            {
-                "question": "Find evidence for: Net profit increased by 12%.",
-                "expected_slots": {"target_statement": "Net profit increased by 12%"},
-            },
-        ),
-        slot_schema={"required": ["target_statement"], "optional": ["scope", "period"]},
-        tool_constraints={"require_snippet": True, "snippet_max_length": 280},
-        execution_config={"precision_mode": True},
-    ),
-)
-
-SummarizationSkill = SkillDefinition(
-    skill_name="SummarizationSkill",
-    query_types=("summarization",),
-    required_slots=("scope",),
-    input_schema={"question": "str", "scope": "str", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"min_evidence": 2},
-    trace_fields=("selected_skill", "tool_chain", "observations", "summary_topics"),
-    package=SkillPackage(
-        task_description="Summarize evidence within a defined scope while preserving citation traceability.",
-        prompt_template=(
-            "You are the Summarization skill. Organize key points by topic, avoid unsupported claims, "
-            "and retain citation grounding."
-        ),
-        few_shot_examples=(
-            {
-                "question": "Summarize the 2025 operations section.",
-                "expected_slots": {"scope": "2025 operations section"},
-            },
-        ),
-        slot_schema={"required": ["scope"], "optional": ["period", "focus"]},
-        tool_constraints={"require_multi_evidence": True},
-        execution_config={"summary_style": "bullet", "max_points": 6},
-    ),
-)
-
-ReportGenerationSkill = SkillDefinition(
-    skill_name="ReportGenerationSkill",
-    query_types=("report_generation",),
-    required_slots=("scope",),
-    input_schema={"question": "str", "scope": "str", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"structured_report": True},
-    trace_fields=("selected_skill", "tool_chain", "observations", "report_outline"),
-    package=SkillPackage(
-        task_description="Generate structured reports from evidence with sectioned output and citations.",
-        prompt_template=(
-            "You are the ReportGeneration skill. Produce sectioned outputs (overview, findings, risks) "
-            "and ensure each section is evidence-grounded."
-        ),
-        few_shot_examples=(
-            {
-                "question": "Generate a compliance report for Q4 controls.",
-                "expected_slots": {"scope": "Q4 controls"},
-            },
-        ),
-        slot_schema={"required": ["scope"], "optional": ["period", "audience"]},
-        tool_constraints={"output_must_be_structured": True},
-        execution_config={"output_format": "sections", "include_risk_section": True},
-    ),
-)
-
-MultiDocCompareSkill = SkillDefinition(
-    skill_name="MultiDocCompareSkill",
-    query_types=("multi_doc_compare",),
-    required_slots=("compare_targets",),
-    input_schema={"question": "str", "compare_targets": "list", "collection_name": "str"},
-    tool_chain=(
-        "query_expander",
-        "parallel_hybrid_retrieval",
-        "two_stage_hybrid_rerank",
-        "evidence_gate",
-        "answer_generator",
-    ),
-    output_schema={"answer": "str", "citations": "list", "evidence": "list", "decision": "str", "schema": "dict"},
-    guardrails={"require_multi_doc_evidence": True},
-    trace_fields=("selected_skill", "tool_chain", "observations", "doc_coverage"),
-    package=SkillPackage(
-        task_description="Compare claims across multiple documents and highlight differences with citations.",
-        prompt_template=(
-            "You are the MultiDocCompare skill. Produce side-by-side comparisons and explicitly call out "
-            "agreement/disagreement with source references."
-        ),
-        few_shot_examples=(
-            {
-                "question": "Compare supplier risk disclosures for Vendor A and Vendor B.",
-                "expected_slots": {"compare_targets": ["Vendor A", "Vendor B"]},
-            },
-        ),
-        slot_schema={"required": ["compare_targets"], "optional": ["period", "scope"]},
-        tool_constraints={"min_distinct_documents": 2},
-        execution_config={"comparison_layout": "side_by_side"},
-    ),
-)
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
-ALL_SKILLS = (
-    FactLookupSkill,
-    TableQASkill,
-    CitationLocateSkill,
-    SummarizationSkill,
-    ReportGenerationSkill,
-    MultiDocCompareSkill,
-)
+def _to_tuple(values: Iterable[Any]) -> Tuple[str, ...]:
+    result: List[str] = []
+    for item in values:
+        text = _clean_text(item)
+        if text:
+            result.append(text)
+    return tuple(result)
+
+
+def _to_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    return {}
+
+
+def _extract_metadata(markdown_text: str, source: Path) -> Dict[str, Any]:
+    match = _MARKDOWN_CODE_BLOCK_RE.search(markdown_text)
+    if not match:
+        raise ValueError(f"Skill markdown is missing a JSON metadata block: {source}")
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON metadata in skill markdown: {source}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Skill metadata must be a JSON object: {source}")
+    return payload
+
+
+def _extract_sections(markdown_text: str) -> Dict[str, str]:
+    sections: Dict[str, str] = {}
+    for title, body in _SECTION_RE.findall(markdown_text):
+        sections[_clean_text(title).lower()] = _clean_text(body)
+    return sections
+
+
+def _require_fields(metadata: Mapping[str, Any], source: Path) -> None:
+    missing = [field for field in _REQUIRED_METADATA_FIELDS if field not in metadata]
+    if missing:
+        raise ValueError(
+            f"Skill markdown metadata is missing required fields {missing}: {source}"
+        )
+
+
+def _ensure_non_empty(value: str, field_name: str, source: Path) -> str:
+    if value:
+        return value
+    raise ValueError(f"Skill markdown is missing required field '{field_name}': {source}")
+
+
+def load_skill_definition(path: str | Path) -> SkillDefinition:
+    source = Path(path)
+    markdown_text = source.read_text(encoding="utf-8")
+    metadata = _extract_metadata(markdown_text, source)
+    sections = _extract_sections(markdown_text)
+    _require_fields(metadata, source)
+
+    task_description = sections.get("task description") or _clean_text(metadata.get("task_description"))
+    prompt_template = sections.get("prompt template") or _clean_text(metadata.get("prompt_template"))
+    task_description = _ensure_non_empty(task_description, "task_description", source)
+    prompt_template = _ensure_non_empty(prompt_template, "prompt_template", source)
+
+    package = SkillPackage(
+        task_description=task_description,
+        prompt_template=prompt_template,
+        few_shot_examples=tuple(metadata.get("few_shot_examples") or []),
+        slot_schema=_to_dict(metadata.get("slot_schema")),
+        tool_constraints=_to_dict(metadata.get("tool_constraints")),
+        execution_config=_to_dict(metadata.get("execution_config")),
+    )
+
+    return SkillDefinition(
+        skill_name=_ensure_non_empty(_clean_text(metadata.get("skill_name")), "skill_name", source),
+        query_types=_to_tuple(metadata.get("query_types") or []),
+        required_slots=_to_tuple(metadata.get("required_slots") or []),
+        input_schema=_to_dict(metadata.get("input_schema")),
+        tool_chain=_to_tuple(metadata.get("tool_chain") or []),
+        output_schema=_to_dict(metadata.get("output_schema")),
+        guardrails=_to_dict(metadata.get("guardrails")),
+        trace_fields=_to_tuple(metadata.get("trace_fields") or []),
+        package=package,
+    )
+
+
+def load_all_skills(skill_dir: str | Path | None = None) -> Tuple[SkillDefinition, ...]:
+    base_dir = Path(skill_dir) if skill_dir is not None else SKILL_DIR
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Skill directory does not exist: {base_dir}")
+
+    skills = [load_skill_definition(path) for path in sorted(base_dir.glob("*.md"))]
+    if not skills:
+        raise ValueError(f"No markdown skills found in {base_dir}")
+
+    names = [skill.skill_name for skill in skills]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Duplicate skill_name found in markdown skills under {base_dir}")
+    return tuple(skills)
+
+
+ALL_SKILLS = load_all_skills()
+_SKILLS_BY_NAME = {skill.skill_name: skill for skill in ALL_SKILLS}
+
+FactLookupSkill = _SKILLS_BY_NAME["FactLookupSkill"]
+TableQASkill = _SKILLS_BY_NAME["TableQASkill"]
+CitationLocateSkill = _SKILLS_BY_NAME["CitationLocateSkill"]
+SummarizationSkill = _SKILLS_BY_NAME["SummarizationSkill"]
+ReportGenerationSkill = _SKILLS_BY_NAME["ReportGenerationSkill"]
+MultiDocCompareSkill = _SKILLS_BY_NAME["MultiDocCompareSkill"]
