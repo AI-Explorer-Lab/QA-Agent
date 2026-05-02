@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Iterable, Mapping
 
-from database.connection import get_pgvector_database_url, get_storage_backend
+from database.connection import get_local_dev_database_url, get_pgvector_database_url, get_storage_backend
 from service.retrieval.pgvector_repository import PgvectorRepository
 from utils.config_loader import get_app_config
 
@@ -19,12 +19,14 @@ def _configured_embedding_dim(config: Mapping[str, Any]) -> int:
 def _build_runtime_repository() -> PgvectorRepository:
     config = get_app_config()
     backend = get_storage_backend(config).strip().lower() or "pgvector"
-    if backend != "pgvector":
-        raise RuntimeError("Runtime repository must use pgvector. Set storage.backend=pgvector in config/app.yaml.")
-
-    database_url = get_pgvector_database_url(config)
+    if backend == "pgvector":
+        database_url = get_pgvector_database_url(config)
+    elif backend == "local_dev":
+        database_url = get_local_dev_database_url(config)
+    else:
+        raise RuntimeError(f"Unsupported runtime repository backend: {backend}")
     return PgvectorRepository(
-        backend="pgvector",
+        backend=backend,
         database_url=database_url,
         embedding_dim=_configured_embedding_dim(config),
     )
@@ -38,7 +40,9 @@ def get_runtime_repository() -> PgvectorRepository:
 
 
 def reset_runtime_repository() -> None:
-    raise RuntimeError("reset_runtime_repository is disabled because runtime storage is pgvector-only.")
+    global _RUNTIME_REPOSITORY
+    with _LOCK:
+        _RUNTIME_REPOSITORY = _build_runtime_repository()
 
 
 def replace_collection_chunks(collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
