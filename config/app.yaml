@@ -66,7 +66,7 @@ embedding:
 storage:
   backend: pgvector
   pgvector:
-    database_url: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa
+    database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
     embedding_dim: 1024
   local_dev:
     enabled: false
@@ -78,12 +78,12 @@ agent:
   default_skill: fact_lookup
 skills:
   enabled:
-  - fact_lookup
-  - table_qa
-  - citation_locate
-  - summarization
-  - report_generation
-  - multi_doc_compare
+    - fact_lookup
+    - table_qa
+    - citation_locate
+    - summarization
+    - report_generation
+    - multi_doc_compare
   clarify_before_skill: true
   fallback_skill: fact_lookup
 pdf:
