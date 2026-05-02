@@ -11,14 +11,6 @@ POST /qa/ask
 GET  /qa/sessions/{session_id}
 ```
 
-Legacy chat-llm endpoints are intentionally not mounted:
-
-```text
-POST /askLLM
-POST /team-leader-task
-POST /react-ask
-```
-
 ## Runtime Path
 
 ```text

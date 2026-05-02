@@ -27,3 +27,6 @@ tmp_pip_proxy/
 .pytest_cache/
 .tmp_pytest_workspace/
 *.md
+!skills/
+!skills/*.md
+.DS_store
