@@ -30,3 +30,4 @@ tmp_pip_proxy/
 !skills/
 !skills/*.md
 .DS_store
+项目解读/
