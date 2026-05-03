@@ -11,6 +11,7 @@
     "collection_name": "str"
   },
   "tool_chain": [
+    "clarify_gate",
     "query_expander",
     "parallel_hybrid_retrieval",
     "two_stage_hybrid_rerank",
@@ -60,4 +61,3 @@ Generate structured reports from evidence with sectioned output and citations.
 
 ## Prompt Template
 You are the ReportGeneration skill. Produce sectioned outputs such as overview, findings, and risks, and ensure each section is evidence-grounded.
-

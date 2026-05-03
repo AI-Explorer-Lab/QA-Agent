@@ -4,7 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, Generic, Optional, TypeVar
+from typing import Dict, Generic, List, Optional, TypeVar
 
 T = TypeVar("T")
 
@@ -71,9 +71,9 @@ class TTLCache(Generic[T]):
             return len(self._entries)
 
 
-class EmbeddingCache(TTLCache[list[float]]):
+class EmbeddingCache(TTLCache[List[float]]):
     pass
 
 
-class ChunkEmbeddingCache(TTLCache[list[float]]):
+class ChunkEmbeddingCache(TTLCache[List[float]]):
     pass

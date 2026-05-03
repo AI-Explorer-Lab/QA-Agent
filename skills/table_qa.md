@@ -12,6 +12,7 @@
     "collection_name": "str"
   },
   "tool_chain": [
+    "clarify_gate",
     "query_expander",
     "parallel_hybrid_retrieval",
     "table_prioritized_retrieval",
@@ -64,4 +65,3 @@ Answer table-centric numerical questions with strong table evidence coverage.
 
 ## Prompt Template
 You are the TableQA skill. Prioritize table rows and cells, preserve period and metric alignment, and include units when available.
-

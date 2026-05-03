@@ -11,6 +11,7 @@
     "collection_name": "str"
   },
   "tool_chain": [
+    "clarify_gate",
     "query_expander",
     "parallel_hybrid_retrieval",
     "two_stage_hybrid_rerank",
@@ -60,4 +61,3 @@ Locate source citations for a target statement and return traceable evidence sni
 
 ## Prompt Template
 You are the CitationLocate skill. Find source-aligned snippets and return citation spans with high precision.
-

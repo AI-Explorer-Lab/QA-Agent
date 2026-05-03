@@ -48,19 +48,9 @@ class EvidenceGate:
         query_type: str,
         retry_count: int = 0,
         table_evidence_quota: int = 2,
-        missing_slots: List[str] | None = None,
         slots: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         slots = slots or {}
-        if missing_slots:
-            return {
-                "decision": "clarify",
-                "reason": "missing_slots",
-                "missing_slots": list(missing_slots),
-                "clarify_question": "Please provide: " + ", ".join(missing_slots),
-                "confidence": 0.0,
-            }
-
         rows = [dict(item) for item in evidence]
         if not rows:
             decision = "retry" if retry_count < self.retry_limit else "refuse"
@@ -87,13 +77,6 @@ class EvidenceGate:
                     "reason": "missing_table_evidence",
                     "confidence": _confidence(rows),
                 }
-            if not slots.get("metric") or not slots.get("period"):
-                return {
-                    "decision": "clarify",
-                    "reason": "table_slots_missing",
-                    "clarify_question": "Please provide metric and period for table QA.",
-                    "confidence": _confidence(rows),
-                }
             return {
                 "decision": "refuse",
                 "reason": "missing_table_evidence_after_retry",
@@ -105,14 +88,6 @@ class EvidenceGate:
                 return {
                     "decision": "retry",
                     "reason": "multi_doc_evidence_missing",
-                    "confidence": _confidence(rows),
-                }
-            targets = slots.get("compare_targets") or []
-            if len(targets) < 2:
-                return {
-                    "decision": "clarify",
-                    "reason": "compare_targets_missing",
-                    "clarify_question": "Please specify at least two documents to compare.",
                     "confidence": _confidence(rows),
                 }
             return {
@@ -189,7 +164,6 @@ class EvidenceDecisionEngine:
         rerank_trace: Mapping[str, Any] | None = None,
         retry_count: int = 0,
         table_evidence_quota: int = 2,
-        missing_slots: List[str] | None = None,
     ) -> Dict[str, Any]:
         rows = [dict(item) for item in evidence if isinstance(item, Mapping)]
         rule_gate = self.rule_gate.evaluate(
@@ -197,7 +171,6 @@ class EvidenceDecisionEngine:
             query_type=query_type,
             retry_count=retry_count,
             table_evidence_quota=table_evidence_quota,
-            missing_slots=missing_slots,
             slots=dict(slots or {}),
         )
         return await self.evidence_agent.decide_from_gate(
@@ -214,7 +187,6 @@ class EvidenceDecisionEngine:
 def run_evidence_gate(
     query_type: str,
     evidence: List[Dict[str, Any]],
-    missing_slots: List[str] | None = None,
     slots: Dict[str, Any] | None = None,
     retry_count: int = 0,
     retry_limit: int = 2,
@@ -234,6 +206,5 @@ def run_evidence_gate(
         query_type=query_type,
         retry_count=retry_count,
         table_evidence_quota=table_evidence_quota,
-        missing_slots=missing_slots,
         slots=slots,
     )

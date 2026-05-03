@@ -355,7 +355,7 @@ class DocumentIndexingService:
                         "storage": {
                             "configured_backend": self.configured_storage_backend,
                             "effective_vector_backend": str(getattr(runtime_repository, "backend", "unknown") or "unknown"),
-                            "target": "pgvector",
+                            "target": str(getattr(runtime_repository, "backend", "unknown") or "unknown"),
                             "persistent_database_write": False,
                             "session_collection_chunks": len(self.session_service.get_collection_chunks(collection)),
                         },
@@ -372,14 +372,6 @@ class DocumentIndexingService:
                 )
             runtime_repository = get_runtime_repository()
             effective_backend = str(getattr(runtime_repository, "backend", "unknown") or "unknown")
-            if effective_backend != "pgvector":
-                raise ValidationException(
-                    message="Document indexing requires pgvector storage.",
-                    detail={
-                        "configured_storage_backend": self.configured_storage_backend,
-                        "effective_vector_backend": effective_backend,
-                    },
-                )
 
             database_timer = start_operation_step(
                 "index.database",
@@ -451,7 +443,6 @@ _DEFAULT_INDEXING_SERVICE = DocumentIndexingService()
 
 def get_document_indexing_service() -> DocumentIndexingService:
     return _DEFAULT_INDEXING_SERVICE
-
 
 
 

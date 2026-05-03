@@ -85,6 +85,33 @@ class TrustedQAWorkflow:
         self.langgraph_available = StateGraph is not None
         self._langgraph_app: Optional[Any] = None
 
+    async def _expand_queries_for_retrieval(
+        self,
+        question: str,
+        query_type: str,
+        expand_query_num: int,
+    ) -> tuple[List[str], List[str] | None, bool]:
+        llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
+        expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
+        return expanded, llm_expanded, bool(llm_expanded)
+
+    @staticmethod
+    def _build_clarify_payload(
+        query_type: str,
+        collection_name: str,
+        slots: Dict[str, Any],
+        selected_skill: Any,
+    ) -> Dict[str, Any]:
+        missing_slots = selected_skill.get_missing_slots(slots) if selected_skill is not None else []
+        if not str(collection_name or "").strip():
+            missing_slots.append("collection_name")
+        return {
+            "decision": "clarify" if missing_slots else "answer",
+            "missing_slots": missing_slots,
+            "clarify_question": build_clarify_question(query_type, missing_slots) if missing_slots else "",
+            "slots": slots,
+        }
+
     def _langgraph_initial_state(
         self,
         question: str,
@@ -115,6 +142,7 @@ class TrustedQAWorkflow:
         graph.add_node("load_session", self._graph_load_session)
         graph.add_node("understand_question", self._graph_understand_question)
         graph.add_node("fill_slots", self._graph_fill_slots)
+        graph.add_node("run_clarify_gate", self._graph_run_clarify_gate)
         graph.add_node("build_clarify_response", self._graph_build_clarify_response)
         graph.add_node("retrieve_evidence", self._graph_retrieve_evidence)
         graph.add_node("evaluate_evidence", self._graph_evaluate_evidence)
@@ -125,9 +153,10 @@ class TrustedQAWorkflow:
         graph.set_entry_point("load_session")
         graph.add_edge("load_session", "understand_question")
         graph.add_edge("understand_question", "fill_slots")
+        graph.add_edge("fill_slots", "run_clarify_gate")
         graph.add_conditional_edges(
-            "fill_slots",
-            self._graph_route_after_slot_fill,
+            "run_clarify_gate",
+            self._graph_route_after_clarify_gate,
             {"clarify": "build_clarify_response", "retrieve": "retrieve_evidence"},
         )
         graph.add_edge("retrieve_evidence", "evaluate_evidence")
@@ -170,20 +199,32 @@ class TrustedQAWorkflow:
         query_type = str(state.get("query_type") or "fact_lookup")
         selected_skill = state.get("selected_skill")
         slots = await self.slot_agent.fill(question, query_type, selected_skill)
-        missing_slots = selected_skill.get_missing_slots(slots) if selected_skill is not None else []
-        if not str(state.get("collection_name") or "").strip():
-            missing_slots.append("collection_name")
-        clarify = {
-            "decision": "clarify" if missing_slots else "answer",
-            "missing_slots": missing_slots,
-            "clarify_question": build_clarify_question(query_type, missing_slots) if missing_slots else "",
-            "slots": slots,
-        }
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "slot_filling_agent", "slots": slots, "missing_slots": missing_slots})
-        return {"slots": slots, "missing_slots": missing_slots, "clarify": clarify, "observations": observations}
+        observations.append({"phase": "slot_filling_agent", "slots": slots})
+        return {"slots": slots, "observations": observations}
 
-    def _graph_route_after_slot_fill(self, state: Dict[str, Any]) -> str:
+    async def _graph_run_clarify_gate(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        query_type = str(state.get("query_type") or "fact_lookup")
+        collection_name = str(state.get("collection_name") or "default")
+        slots = dict(state.get("slots") or {})
+        selected_skill = state.get("selected_skill")
+        clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
+        observations = list(state.get("observations") or [])
+        observations.append(
+            {
+                "phase": "clarify_gate",
+                "slots": slots,
+                "missing_slots": clarify.get("missing_slots") or [],
+                "decision": clarify.get("decision") or "answer",
+            }
+        )
+        return {
+            "missing_slots": list(clarify.get("missing_slots") or []),
+            "clarify": clarify,
+            "observations": observations,
+        }
+
+    def _graph_route_after_clarify_gate(self, state: Dict[str, Any]) -> str:
         clarify = state.get("clarify") or {}
         return "clarify" if clarify.get("decision") == "clarify" else "retrieve"
 
@@ -207,8 +248,11 @@ class TrustedQAWorkflow:
         question = str(state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         expand_query_num = int(state.get("expand_query_num") or 3)
-        llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
-        expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
+        expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
+            question,
+            query_type,
+            expand_query_num,
+        )
         retrieval_result = await self.retriever.retrieve(
             question=question,
             collection_name=str(state.get("collection_name") or "default"),
@@ -224,7 +268,7 @@ class TrustedQAWorkflow:
         return {
             "llm_expanded": llm_expanded,
             "expanded": expanded,
-            "llm_expansion_used": bool(llm_expanded),
+            "llm_expansion_used": llm_expansion_used,
             "retrieval_result": retrieval_result,
             "evidence": evidence,
             "observations": observations,
@@ -256,18 +300,26 @@ class TrustedQAWorkflow:
         retry_count = int(state.get("retry_count") or 0) + 1
         gate = dict(state.get("gate") or {})
         retry_question = str(gate.get("suggested_retry_query") or "").strip() or str(state.get("question") or "")
+        query_type = str(state.get("query_type") or "fact_lookup")
+        expand_query_num = max(1, int(state.get("expand_query_num") or 3))
+        retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
+            retry_question,
+            query_type,
+            expand_query_num,
+        )
         retry_result = await self.retriever.retrieve(
             question=retry_question,
             collection_name=str(state.get("collection_name") or "default"),
             top_k=max(1, int(state.get("top_k") or 5)),
-            query_type=str(state.get("query_type") or "fact_lookup"),
-            expand_query_num=max(1, int(state.get("expand_query_num") or 3)),
+            query_type=query_type,
+            expand_query_num=expand_query_num,
             enable_cache=False,
+            expanded_queries=retry_expanded,
         )
         evidence = list(retry_result.get("evidence") or state.get("evidence") or [])
         gate = await self.evidence_decision.evaluate(
             question=str(state.get("question") or ""),
-            query_type=str(state.get("query_type") or "fact_lookup"),
+            query_type=query_type,
             slots=state.get("slots") or {},
             selected_skill=str(getattr(state.get("selected_skill"), "skill_name", "")),
             evidence=evidence,
@@ -276,8 +328,18 @@ class TrustedQAWorkflow:
             table_evidence_quota=self.table_evidence_quota,
         )
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
-        return {"retry_count": retry_count, "retry_question": retry_question, "retrieval_result": retry_result, "evidence": evidence, "gate": gate, "observations": observations}
+        observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
+        return {
+            "retry_count": retry_count,
+            "retry_question": retry_question,
+            "llm_expanded": retry_llm_expanded,
+            "expanded": retry_expanded,
+            "llm_expansion_used": bool(state.get("llm_expansion_used")) or retry_llm_expansion_used,
+            "retrieval_result": retry_result,
+            "evidence": evidence,
+            "gate": gate,
+            "observations": observations,
+        }
 
     def _graph_route_after_retry(self, state: Dict[str, Any]) -> str:
         gate = state.get("gate") or {}
@@ -406,21 +468,19 @@ class TrustedQAWorkflow:
         query_type = str(intent_trace.get("query_type") or "fact_lookup")
         selected_skill = self.skill_registry.select_skill(query_type)
         slots = await self.slot_agent.fill(question, query_type, selected_skill)
-        missing_slots = selected_skill.get_missing_slots(slots)
         skill_package = selected_skill.package_metadata()
-        if not str(collection_name or "").strip():
-            missing_slots.append("collection_name")
-        clarify = {
-            "decision": "clarify" if missing_slots else "answer",
-            "missing_slots": missing_slots,
-            "clarify_question": build_clarify_question(query_type, missing_slots) if missing_slots else "",
-            "slots": slots,
-        }
+        clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
         observations: List[Dict[str, Any]] = [
             {"phase": "load_session", "session_id": sid},
             {"phase": "intent_understanding_agent", "intent": intent_trace},
             {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package},
-            {"phase": "slot_filling_agent", "slots": slots, "missing_slots": missing_slots},
+            {"phase": "slot_filling_agent", "slots": slots},
+            {
+                "phase": "clarify_gate",
+                "slots": slots,
+                "missing_slots": clarify.get("missing_slots") or [],
+                "decision": clarify.get("decision") or "answer",
+            },
         ]
 
         if clarify["decision"] == "clarify":
@@ -451,9 +511,11 @@ class TrustedQAWorkflow:
             self._save(sid, question, response)
             return response
 
-        llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
-        expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
-        llm_expansion_used = bool(llm_expanded)
+        expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
+            question,
+            query_type,
+            expand_query_num,
+        )
 
         retrieval_result = await self.retriever.retrieve(
             question=question,
@@ -482,6 +544,13 @@ class TrustedQAWorkflow:
         while gate.get("decision") == "retry" and retry_count < self.evidence_decision.retry_limit:
             retry_count += 1
             retry_question = str(gate.get("suggested_retry_query") or "").strip() or question
+            retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
+                retry_question,
+                query_type,
+                expand_query_num,
+            )
+            llm_expansion_used = llm_expansion_used or retry_llm_expansion_used
+            expanded = retry_expanded
             retry_result = await self.retriever.retrieve(
                 question=retry_question,
                 collection_name=collection_name,
@@ -489,6 +558,7 @@ class TrustedQAWorkflow:
                 query_type=query_type,
                 expand_query_num=max(1, int(expand_query_num)),
                 enable_cache=False,
+                expanded_queries=retry_expanded,
             )
             evidence = list(retry_result.get("evidence") or evidence)
             retrieval_result = retry_result
@@ -502,7 +572,7 @@ class TrustedQAWorkflow:
                 retry_count=retry_count,
                 table_evidence_quota=self.table_evidence_quota,
             )
-            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
+            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "llm_expanded": retry_llm_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
 
         decision = gate.get("decision", "refuse")
         if decision == "retry":

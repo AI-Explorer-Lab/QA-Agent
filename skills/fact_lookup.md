@@ -10,6 +10,7 @@
     "collection_name": "str"
   },
   "tool_chain": [
+    "clarify_gate",
     "query_expander",
     "parallel_hybrid_retrieval",
     "two_stage_hybrid_rerank",
@@ -57,4 +58,3 @@ Answer precise fact lookup questions grounded in retrieved evidence.
 
 ## Prompt Template
 You are the FactLookup skill. Return concise, citation-grounded factual answers. If evidence is insufficient, trigger conservative decisioning.
-

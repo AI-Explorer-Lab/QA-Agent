@@ -58,8 +58,8 @@ INTENT_NAMES = {
 }
 
 SLOT_KEYS = ("years", "metric", "period", "target_statement", "compare_targets", "scope", "table_name", "unit", "focus")
-FINAL_AUDIT_DECISIONS = {"answer", "retry", "clarify", "refuse"}
-DECISION_RANK = {"answer": 0, "retry": 1, "clarify": 2, "refuse": 3}
+FINAL_AUDIT_DECISIONS = {"answer", "retry", "refuse"}
+DECISION_RANK = {"answer": 0, "retry": 1, "refuse": 2}
 YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
@@ -429,35 +429,20 @@ class EvidenceAuditAgent:
         if audit_payload.get("missing_aspects"):
             result["missing_aspects"] = _clean_list(audit_payload.get("missing_aspects"))
 
-        if gate_decision in {"clarify", "refuse"}:
+        if gate_decision == "refuse":
             result["decision"] = gate_decision
-            if gate_decision == "clarify":
-                result["clarify_question"] = _clean_str(
-                    gate_payload.get("clarify_question")
-                    or audit_payload.get("clarify_question")
-                    or result.get("clarify_question")
-                )
             result["reason"] = _clean_str(gate_payload.get("reason") or result.get("reason") or audit_payload.get("reason"))
             result["suggested_retry_query"] = ""
             return result
 
         final_decision = gate_decision
-        if gate_decision == "answer" and DECISION_RANK[audit_payload["semantic_decision"]] > DECISION_RANK[gate_decision]:
-            final_decision = audit_payload["semantic_decision"]
+        audit_decision = audit_payload["semantic_decision"]
+        if gate_decision == "answer" and DECISION_RANK[audit_decision] > DECISION_RANK[gate_decision]:
+            final_decision = audit_decision
 
         result["decision"] = final_decision
         if final_decision == "answer":
             result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "evidence_passed")
-            result["suggested_retry_query"] = ""
-            return result
-
-        if final_decision == "clarify":
-            result["reason"] = _clean_str(audit_payload.get("reason") or gate_payload.get("reason") or "clarify")
-            result["clarify_question"] = _clean_str(
-                gate_payload.get("clarify_question")
-                or audit_payload.get("clarify_question")
-                or result.get("clarify_question")
-            )
             result["suggested_retry_query"] = ""
             return result
 
@@ -551,7 +536,7 @@ class EvidenceAuditAgent:
                 "evidence": evidence_brief,
                 "rerank_trace": dict(rerank_trace or {}),
                 "schema": {
-                    "semantic_decision": "answer | retry | clarify | refuse",
+                    "semantic_decision": "answer | retry | refuse",
                     "missing_aspects": [],
                     "evidence_coverage": "sufficient | partial | poor",
                     "conflict_detected": False,
@@ -689,7 +674,5 @@ def merge_audit_and_rule_gate(rule_gate: Mapping[str, Any], audit: Mapping[str, 
     if audit_payload.get("missing_aspects"):
         merged.setdefault("missing_aspects", audit_payload["missing_aspects"])
     return merged
-
-
 
 

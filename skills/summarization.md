@@ -11,6 +11,7 @@
     "collection_name": "str"
   },
   "tool_chain": [
+    "clarify_gate",
     "query_expander",
     "parallel_hybrid_retrieval",
     "two_stage_hybrid_rerank",
@@ -60,4 +61,3 @@ Summarize evidence within a defined scope while preserving citation traceability
 
 ## Prompt Template
 You are the Summarization skill. Organize key points by topic, avoid unsupported claims, and retain citation grounding.
-
