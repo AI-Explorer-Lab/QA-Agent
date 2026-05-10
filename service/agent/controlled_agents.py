@@ -397,7 +397,8 @@ class EvidenceAuditAgent:
         llm_audit = await self._audit_with_llm(question, query_type, slots, selected_skill, evidence, rerank_trace)
         if llm_audit is None:
             return fallback
-        return self._normalize_audit(llm_audit, fallback=fallback)
+        sanitized = self._sanitize_llm_audit(question, llm_audit, fallback)
+        return self._normalize_audit(sanitized, fallback=fallback)
     async def decide_from_gate(
         self,
         question: str,
@@ -447,11 +448,11 @@ class EvidenceAuditAgent:
             return result
 
         if final_decision == "refuse":
-            result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "refuse")
+            result["reason"] = _clean_str(audit_payload.get("reason") or gate_payload.get("reason") or "refuse")
             result["suggested_retry_query"] = ""
             return result
 
-        result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "retry")
+        result["reason"] = _clean_str(audit_payload.get("reason") or gate_payload.get("reason") or "retry")
         result["suggested_retry_query"] = self._build_retry_query_from_gate(
             question=question,
             query_type=query_type,
@@ -460,6 +461,31 @@ class EvidenceAuditAgent:
             audit=audit_payload,
         )
         return result
+
+    @staticmethod
+    def _sanitize_llm_audit(
+        question: str,
+        audit: Mapping[str, Any],
+        fallback: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        sanitized = dict(audit or {})
+        normalized_question = _clean_str(question)
+        normalized_reason = _clean_str(sanitized.get("reason")).lower()
+        missing_aspects = _clean_list(sanitized.get("missing_aspects"))
+        lowered_missing = [item.lower() for item in missing_aspects]
+
+        if normalized_question and "question" in lowered_missing:
+            kept_missing = [item for item in missing_aspects if item.lower() != "question"]
+            sanitized["missing_aspects"] = kept_missing
+            if (
+                sanitized.get("semantic_decision") in {"retry", "refuse"}
+                and ("no question" in normalized_reason or "question was provided" not in normalized_reason)
+            ):
+                fallback_payload = dict(fallback or {})
+                fallback_payload.setdefault("reason", "LLM audit incorrectly marked the provided question as missing.")
+                return fallback_payload
+
+        return sanitized
 
     @staticmethod
     def _build_retry_query_from_gate(

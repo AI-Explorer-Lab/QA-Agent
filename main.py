@@ -24,6 +24,12 @@ def _patch_httpx_testclient_compat() -> None:
 _patch_httpx_testclient_compat()
 
 
+from core.config_loader import load_runtime_env
+
+# Load .env/YAML-backed runtime settings before importing modules that
+# initialize database-backed services at import time.
+load_runtime_env()
+
 from controller.apis import router
 from middlewares.exception_handler import app_exception_handler
 from middlewares.request_log import RequestLogMiddleware

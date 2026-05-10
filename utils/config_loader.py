@@ -28,7 +28,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timezone": "Asia/Singapore",
     },
     "llm": {
-        "current_model": "anyrouter-gpt-5.3-codex",
+        "current_model": "anyrouter-gpt-5.5",
         "temperature": 0.2,
         "max_tokens": 2048,
     },

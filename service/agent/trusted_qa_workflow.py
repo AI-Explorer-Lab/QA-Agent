@@ -181,7 +181,9 @@ class TrustedQAWorkflow:
         sid = session["session_id"]
         observations = list(state.get("observations") or [])
         observations.append({"phase": "load_session", "session_id": sid})
-        return {"session": session, "sid": sid, "observations": observations}
+        next_state = dict(state)
+        next_state.update({"session": session, "sid": sid, "observations": observations})
+        return next_state
 
     async def _graph_understand_question(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("question") or "")
@@ -192,7 +194,17 @@ class TrustedQAWorkflow:
         observations = list(state.get("observations") or [])
         observations.append({"phase": "intent_understanding_agent", "intent": intent_trace})
         observations.append({"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package})
-        return {"intent_trace": intent_trace, "query_type": query_type, "selected_skill": selected_skill, "skill_package": skill_package, "observations": observations}
+        next_state = dict(state)
+        next_state.update(
+            {
+                "intent_trace": intent_trace,
+                "query_type": query_type,
+                "selected_skill": selected_skill,
+                "skill_package": skill_package,
+                "observations": observations,
+            }
+        )
+        return next_state
 
     async def _graph_fill_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("question") or "")
@@ -201,7 +213,9 @@ class TrustedQAWorkflow:
         slots = await self.slot_agent.fill(question, query_type, selected_skill)
         observations = list(state.get("observations") or [])
         observations.append({"phase": "slot_filling_agent", "slots": slots})
-        return {"slots": slots, "observations": observations}
+        next_state = dict(state)
+        next_state.update({"slots": slots, "observations": observations})
+        return next_state
 
     async def _graph_run_clarify_gate(self, state: Dict[str, Any]) -> Dict[str, Any]:
         query_type = str(state.get("query_type") or "fact_lookup")
@@ -218,11 +232,15 @@ class TrustedQAWorkflow:
                 "decision": clarify.get("decision") or "answer",
             }
         )
-        return {
-            "missing_slots": list(clarify.get("missing_slots") or []),
-            "clarify": clarify,
-            "observations": observations,
-        }
+        next_state = dict(state)
+        next_state.update(
+            {
+                "missing_slots": list(clarify.get("missing_slots") or []),
+                "clarify": clarify,
+                "observations": observations,
+            }
+        )
+        return next_state
 
     def _graph_route_after_clarify_gate(self, state: Dict[str, Any]) -> str:
         clarify = state.get("clarify") or {}
@@ -243,7 +261,9 @@ class TrustedQAWorkflow:
             str(getattr(state.get("selected_skill"), "skill_name", "")),
         )
         response["answer"] = clarify.get("clarify_question") or response.get("answer", "")
-        return {"response": response, "decision": "clarify", "llm_expansion_used": False, "llm_answer_used": False}
+        next_state = dict(state)
+        next_state.update({"response": response, "decision": "clarify", "llm_expansion_used": False, "llm_answer_used": False})
+        return next_state
     async def _graph_retrieve_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
@@ -265,14 +285,18 @@ class TrustedQAWorkflow:
         evidence = list(retrieval_result.get("evidence") or [])
         observations = list(state.get("observations") or [])
         observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
-        return {
-            "llm_expanded": llm_expanded,
-            "expanded": expanded,
-            "llm_expansion_used": llm_expansion_used,
-            "retrieval_result": retrieval_result,
-            "evidence": evidence,
-            "observations": observations,
-        }
+        next_state = dict(state)
+        next_state.update(
+            {
+                "llm_expanded": llm_expanded,
+                "expanded": expanded,
+                "llm_expansion_used": llm_expansion_used,
+                "retrieval_result": retrieval_result,
+                "evidence": evidence,
+                "observations": observations,
+            }
+        )
+        return next_state
 
     async def _graph_evaluate_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
         gate = await self.evidence_decision.evaluate(
@@ -287,7 +311,9 @@ class TrustedQAWorkflow:
         )
         observations = list(state.get("observations") or [])
         observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate})
-        return {"gate": gate, "observations": observations}
+        next_state = dict(state)
+        next_state.update({"gate": gate, "observations": observations})
+        return next_state
 
     def _graph_route_after_gate(self, state: Dict[str, Any]) -> str:
         gate = state.get("gate") or {}
@@ -329,17 +355,21 @@ class TrustedQAWorkflow:
         )
         observations = list(state.get("observations") or [])
         observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
-        return {
-            "retry_count": retry_count,
-            "retry_question": retry_question,
-            "llm_expanded": retry_llm_expanded,
-            "expanded": retry_expanded,
-            "llm_expansion_used": bool(state.get("llm_expansion_used")) or retry_llm_expansion_used,
-            "retrieval_result": retry_result,
-            "evidence": evidence,
-            "gate": gate,
-            "observations": observations,
-        }
+        next_state = dict(state)
+        next_state.update(
+            {
+                "retry_count": retry_count,
+                "retry_question": retry_question,
+                "llm_expanded": retry_llm_expanded,
+                "expanded": retry_expanded,
+                "llm_expansion_used": bool(state.get("llm_expansion_used")) or retry_llm_expansion_used,
+                "retrieval_result": retry_result,
+                "evidence": evidence,
+                "gate": gate,
+                "observations": observations,
+            }
+        )
+        return next_state
 
     def _graph_route_after_retry(self, state: Dict[str, Any]) -> str:
         gate = state.get("gate") or {}
@@ -384,12 +414,16 @@ class TrustedQAWorkflow:
             expanded_queries=state.get("expanded") or [],
             gate=gate,
         )
-        return {"response": response, "decision": decision, "gate": gate, "llm_answer_used": llm_answer_used}
+        next_state = dict(state)
+        next_state.update({"response": response, "decision": decision, "gate": gate, "llm_answer_used": llm_answer_used})
+        return next_state
 
     async def _graph_persist_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         response = dict(state.get("response") or {})
         if not response:
-            return {"response": {}}
+            next_state = dict(state)
+            next_state.update({"response": {}})
+            return next_state
         selected_skill = state.get("selected_skill")
         response = self._apply_response_traces(
             response=response,
@@ -405,7 +439,9 @@ class TrustedQAWorkflow:
             question=str(state.get("question") or ""),
         )
         self._save(str(state.get("sid") or ""), str(state.get("question") or ""), response)
-        return {"response": response}
+        next_state = dict(state)
+        next_state.update({"response": response})
+        return next_state
 
     async def _ask_with_langgraph(
         self,

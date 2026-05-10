@@ -85,7 +85,7 @@ def _split_selector(selector: str, providers: Dict[str, Any]) -> Tuple[str, str]
     if isinstance(providers, dict):
         provider_names = [_clean_str(name) for name in providers.keys() if _clean_str(name)]
 
-    # Prefer exact provider prefix matching, e.g. anyrouter-gpt-5.3-codex
+    # Prefer exact provider prefix matching, e.g. anyrouter-gpt-5.5
     for provider_name in sorted(provider_names, key=len, reverse=True):
         prefix = f"{provider_name}-"
         if selector.startswith(prefix):

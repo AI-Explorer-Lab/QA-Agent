@@ -4,8 +4,8 @@ app:
   timezone: Asia/Singapore
 llm:
   provider: anyrouter
-  current_model: anyrouter-gpt-5.3-codex
-  model: gpt-5.3-codex
+  current_model: anyrouter-gpt-5.5
+  model: gpt-5.5
   api_key: ''
   base_url: https://anyrouter.top/v1
   api_key_env: ANYROUTER_API_KEY
@@ -18,14 +18,14 @@ llm:
     anyrouter:
       base_url: https://anyrouter.top/v1
       anthropic_base_url: https://anyrouter.top/v1
-      api_key_env: ANYROUTER_API_KEY
+      api_key_env: ***REMOVED_API_KEY***
       use_responses_api: true
       http_proxy: http://127.0.0.1:7897
       https_proxy: http://127.0.0.1:7897
       no_proxy: 127.0.0.1,localhost
       models:
-        gpt-5.3-codex:
-          model: gpt-5.3-codex
+        gpt-5.5:
+          model: gpt-5.5
           use_responses_api: true
         gpt-5-codex:
           model: gpt-5-codex
@@ -45,8 +45,8 @@ llm:
       api_key_env: OPENAI_API_KEY
       use_responses_api: true
       models:
-        gpt-5.3-codex:
-          model: gpt-5.3-codex
+        gpt-5.5:
+          model: gpt-5.5
         gpt-5-codex:
           model: gpt-5-codex
     zhipu:
@@ -66,7 +66,7 @@ embedding:
 storage:
   backend: pgvector
   pgvector:
-    database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
+    database_url: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa
     embedding_dim: 1024
   local_dev:
     enabled: false
