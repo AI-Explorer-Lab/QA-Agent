@@ -3,6 +3,7 @@
 import re
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+from .cross_encoder import TransformersCrossEncoderScorer
 from .sparse_retriever import coarse_tokenize
 
 
@@ -104,6 +105,28 @@ def _candidate_id(candidate: Dict[str, Any]) -> str:
     return f"anon-{abs(hash(raw_doc))}"
 
 
+def _candidate_pair_text(candidate: Dict[str, Any]) -> str:
+    parts = [
+        str(candidate.get("heading_path") or ""),
+        str(candidate.get("level1_title") or ""),
+        str(candidate.get("level2_title") or ""),
+        str(candidate.get("level3_title") or ""),
+        str(candidate.get("doc_source") or ""),
+        str(candidate.get("table_header_text") or ""),
+        str(candidate.get("table_context_text") or ""),
+        str(candidate.get("raw_doc") or candidate.get("content") or ""),
+    ]
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        value = re.sub(r"\s+", " ", str(part or "")).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return "\n".join(cleaned)
+
+
 def _normalize_exact_text(text: str) -> str:
     normalized = str(text or "").lower()
     normalized = re.sub(r"\s+", "", normalized)
@@ -130,6 +153,13 @@ class TwoStageHybridReranker:
         table_boost_weight: float = 0.05,
         near_duplicate_threshold: float = 0.90,
         table_evidence_quota: int = 2,
+        cross_encoder_enabled: bool = True,
+        cross_encoder_model: str = "BAAI/bge-reranker-base",
+        cross_encoder_candidate_pool: int = 30,
+        cross_encoder_batch_size: int = 8,
+        cross_encoder_max_length: int = 512,
+        cross_encoder_local_files_only: bool = False,
+        cross_encoder_scorer: Any | None = None,
     ) -> None:
         self.dense_weight = float(dense_weight)
         self.bm25_weight = float(bm25_weight)
@@ -137,6 +167,14 @@ class TwoStageHybridReranker:
         self.table_boost_weight = float(table_boost_weight)
         self.near_duplicate_threshold = float(near_duplicate_threshold)
         self.table_evidence_quota = max(0, int(table_evidence_quota))
+        self.cross_encoder_enabled = bool(cross_encoder_enabled)
+        self.cross_encoder_model = str(cross_encoder_model or "BAAI/bge-reranker-base")
+        self.cross_encoder_candidate_pool = max(1, int(cross_encoder_candidate_pool))
+        self.cross_encoder_batch_size = max(1, int(cross_encoder_batch_size))
+        self.cross_encoder_max_length = max(16, int(cross_encoder_max_length))
+        self.cross_encoder_local_files_only = bool(cross_encoder_local_files_only)
+        self._cross_encoder_scorer = cross_encoder_scorer
+        self._cross_encoder_load_failed = ""
 
     def rerank(
         self,
@@ -211,9 +249,14 @@ class TwoStageHybridReranker:
                 seen_exact.add(normalized_text)
             selected_token_sets.append(token_set)
 
-        selected = deduped[:limit]
-        selected, neighbor_supplemented = self._supplement_neighbors(selected, deduped, limit)
-        selected = self._finalize_selection(selected, deduped, limit, query_type, quota)
+        candidate_pool_limit = max(limit, self.cross_encoder_candidate_pool)
+        seed_pool = deduped[:limit]
+        seed_pool, neighbor_supplemented = self._supplement_neighbors(seed_pool, deduped, limit)
+        light_pool = self._merge_unique(seed_pool, deduped, candidate_pool_limit)
+        light_pool = self._finalize_selection(light_pool, deduped, candidate_pool_limit, query_type, quota)
+        selected, cross_encoder_trace = self._cross_encoder_rerank(query, light_pool, limit, query_type, quota)
+        if not selected:
+            selected = light_pool[:limit]
 
         trace = {
             "weights": {
@@ -225,6 +268,9 @@ class TwoStageHybridReranker:
             "query_type": query_type,
             "input_candidates": len(rows),
             "after_near_duplicate": len(deduped),
+            "light_candidate_pool_size": len(light_pool),
+            "cross_encoder_candidate_pool": candidate_pool_limit,
+            "cross_encoder": cross_encoder_trace,
             "table_evidence_quota": quota,
             "table_evidence_selected": sum(1 for row in selected if str(row.get("chunk_type") or "") == "table"),
             "neighbor_supplemented": neighbor_supplemented,
@@ -236,6 +282,7 @@ class TwoStageHybridReranker:
                     "bm25_score": row.get("bm25_score"),
                     "metadata_boost": row.get("metadata_boost"),
                     "table_boost": row.get("table_boost"),
+                    "cross_encoder_score": row.get("cross_encoder_score"),
                 }
                 for row in selected[: min(len(selected), 10)]
             ],
@@ -255,12 +302,101 @@ class TwoStageHybridReranker:
             "query_type": query_type,
             "input_candidates": 0,
             "after_near_duplicate": 0,
+            "light_candidate_pool_size": 0,
+            "cross_encoder_candidate_pool": self.cross_encoder_candidate_pool,
+            "cross_encoder": {"status": "skipped", "reason": "empty_candidates"},
             "table_evidence_quota": quota,
             "table_evidence_selected": 0,
             "neighbor_supplemented": 0,
             "top": [],
             "top_k": max(1, int(top_k)),
         }
+
+    def _cross_encoder_rerank(
+        self,
+        query: str,
+        light_pool: Sequence[Dict[str, Any]],
+        limit: int,
+        query_type: str,
+        quota: int,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if not self.cross_encoder_enabled:
+            return list(light_pool[:limit]), {"status": "disabled"}
+        if not light_pool:
+            return [], {"status": "skipped", "reason": "empty_candidate_pool"}
+
+        scorer = self._get_cross_encoder_scorer()
+        if scorer is None:
+            reason = self._cross_encoder_load_failed or "scorer_unavailable"
+            return list(light_pool[:limit]), {"status": "fallback", "reason": reason, "model": self.cross_encoder_model}
+
+        texts = [_candidate_pair_text(item) for item in light_pool]
+        try:
+            scores, score_trace = scorer.score(query, texts)
+        except Exception as exc:
+            score_trace = {"status": "fallback", "reason": f"{type(exc).__name__}: {exc}"[:500]}
+            scores = []
+
+        if not scores or len(scores) != len(light_pool):
+            trace = dict(score_trace or {})
+            trace.setdefault("status", "fallback")
+            trace.setdefault("reason", "invalid_score_count")
+            trace.setdefault("model", self.cross_encoder_model)
+            return list(light_pool[:limit]), trace
+
+        scored_rows: List[Dict[str, Any]] = []
+        for row, score in zip(light_pool, scores):
+            payload = dict(row)
+            payload["light_final_score"] = _safe_float(payload.get("final_score"))
+            payload["cross_encoder_score"] = float(score)
+            payload["final_score"] = float(score)
+            scored_rows.append(payload)
+
+        scored_rows.sort(key=lambda item: _safe_float(item.get("cross_encoder_score")), reverse=True)
+        selected = self._finalize_selection(scored_rows[:limit], scored_rows, limit, query_type, quota)
+        trace = dict(score_trace or {})
+        trace.setdefault("status", "applied")
+        trace.setdefault("model", self.cross_encoder_model)
+        trace["input_candidates"] = len(light_pool)
+        trace["selected"] = len(selected)
+        return selected, trace
+
+    def _get_cross_encoder_scorer(self) -> Any | None:
+        if self._cross_encoder_scorer is not None:
+            return self._cross_encoder_scorer
+        if self._cross_encoder_load_failed:
+            return None
+
+        scorer = TransformersCrossEncoderScorer(
+            model_name=self.cross_encoder_model,
+            batch_size=self.cross_encoder_batch_size,
+            max_length=self.cross_encoder_max_length,
+            local_files_only=self.cross_encoder_local_files_only,
+        )
+        if not scorer._load():
+            self._cross_encoder_load_failed = scorer.last_error or "model_load_failed"
+            return None
+        self._cross_encoder_scorer = scorer
+        return self._cross_encoder_scorer
+
+    def _merge_unique(
+        self,
+        preferred: Sequence[Dict[str, Any]],
+        ranked: Sequence[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for source in (preferred, ranked):
+            for item in source:
+                cid = _candidate_id(item)
+                if cid in seen:
+                    continue
+                merged.append(dict(item))
+                seen.add(cid)
+                if len(merged) >= limit:
+                    return merged
+        return merged
 
     def _finalize_selection(
         self,

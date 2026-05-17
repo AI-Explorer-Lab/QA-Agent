@@ -114,7 +114,7 @@ async def _parse_document_index_request(request: Request) -> DocumentIndexReques
 
 
 @router.post("/documents/index")
-async def index_documents(request: DocumentIndexRequest):
+async def index_documents(request: Request):
     payload = await _parse_document_index_request(request)
     return await get_document_indexing_service().index_documents(
         pdf_path=payload.pdf_path,

@@ -34,10 +34,12 @@ class HybridRetriever:
         enable_cache: bool = True,
         expanded_queries: Sequence[str] | None = None,
     ) -> Dict[str, Any]:
+        candidate_pool_size = max(1, int(getattr(self.reranker, "cross_encoder_candidate_pool", 30) or 30))
+        stage_top_k = max(max(1, int(top_k)) * 4, candidate_pool_size)
         stage1 = await self.parallel_executor.execute(
             question=question,
             collection_name=collection_name,
-            top_k=max(1, int(top_k)) * 4,
+            top_k=stage_top_k,
             query_type=query_type,
             expand_query_num=expand_query_num,
             enable_cache=enable_cache,

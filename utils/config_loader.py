@@ -82,7 +82,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "retrieval": {
         "strategy": "hybrid",
         "top_k": 5,
-        "expand_query_num": 3,
+        "expand_query_num": 4,
         "max_concurrency": 6,
         "query_timeout_seconds": 20,
         "table_evidence_quota": 2,
@@ -94,6 +94,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "table_boost_weight": 0.05,
         "top_n_factor": 4,
         "near_duplicate_threshold": 0.90,
+        "cross_encoder_enabled": True,
+        "cross_encoder_model": "BAAI/bge-reranker-base",
+        "cross_encoder_candidate_pool": 30,
+        "cross_encoder_batch_size": 8,
+        "cross_encoder_max_length": 512,
+        "cross_encoder_local_files_only": False,
     },
     "cache": {
         "enabled": True,

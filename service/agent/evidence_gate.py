@@ -47,7 +47,7 @@ class EvidenceGate:
         evidence: List[Dict[str, Any]],
         query_type: str,
         retry_count: int = 0,
-        table_evidence_quota: int = 2,
+        table_evidence_quota: int = 1,
         slots: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         slots = slots or {}
@@ -192,7 +192,7 @@ def run_evidence_gate(
     retry_limit: int = 2,
     min_top_score: float = 0.45,
     min_avg_score: float = 0.30,
-    table_evidence_quota: int = 2,
+    table_evidence_quota: int = 1,
     refuse_on_low_evidence: bool = True,
 ) -> Dict[str, Any]:
     gate = EvidenceGate(

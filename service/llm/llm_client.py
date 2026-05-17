@@ -420,7 +420,8 @@ class LLMService:
         if not (self.is_available or self.langchain_available):
             self._client_instance()
             return None
-        total = max(1, int(expand_query_num))
+        del expand_query_num
+        total = 4
         system_prompt = (
             "You rewrite enterprise PDF QA questions for hybrid retrieval. "
             "Return only a JSON array of concise retrieval queries. Do not answer the question."
@@ -428,8 +429,10 @@ class LLMService:
         user_prompt = (
             f"Question: {question}\n"
             f"Query type: {query_type}\n"
-            f"Return exactly {total} Chinese-friendly search queries. "
-            "Keep named entities, years, metrics, table headers, page hints and document targets."
+            "Return exactly 4 Chinese-friendly search queries: the original question first, "
+            "then two concise noise-reduced rewrite variants, then one query_type scene-enhanced variant. "
+            "Keep named entities, years, metrics, table headers and document targets. "
+            "Do not add page numbers unless the original question already contains them."
         )
         content = await self.complete(system_prompt, user_prompt, max_tokens=320)
         queries = _extract_json_array(content or "")

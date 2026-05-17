@@ -245,6 +245,7 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
     storage = config.get("storage", {}) if isinstance(config.get("storage"), dict) else {}
     storage_pgvector = storage.get("pgvector", {}) if isinstance(storage.get("pgvector"), dict) else {}
     retrieval = config.get("retrieval", {}) if isinstance(config.get("retrieval"), dict) else {}
+    reranker = config.get("reranker", {}) if isinstance(config.get("reranker"), dict) else {}
     chunking = config.get("chunking", {}) if isinstance(config.get("chunking"), dict) else {}
     embedding = config.get("embedding", {}) if isinstance(config.get("embedding"), dict) else {}
 
@@ -287,6 +288,9 @@ def _map_to_env(config: Dict[str, Any]) -> Dict[str, str]:
         "HYBRID_BM25_MIN_SCORE": retrieval.get("bm25_min_score"),
         "HYBRID_TABLE_QUOTA": retrieval.get("hybrid_table_quota"),
         "HYBRID_TABLE_SCORE_FLOOR": retrieval.get("hybrid_table_score_floor"),
+        "RERANKER_CROSS_ENCODER_ENABLED": reranker.get("cross_encoder_enabled"),
+        "RERANKER_CROSS_ENCODER_MODEL": reranker.get("cross_encoder_model"),
+        "RERANKER_CROSS_ENCODER_CANDIDATE_POOL": reranker.get("cross_encoder_candidate_pool"),
         "CHUNK_SIZE_TOKENS": chunking.get("chunk_size_tokens"),
         "CHUNK_OVERLAP_TOKENS": chunking.get("chunk_overlap_tokens"),
         "MAX_CHUNK_SIZE": chunking.get("max_chunk_size"),

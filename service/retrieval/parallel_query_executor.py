@@ -56,6 +56,15 @@ def _looks_like_table_query(query: str) -> bool:
     return token_count >= 4 and any(char.isdigit() for char in text)
 
 
+def _query_type_hint(query_type: str) -> str:
+    hints = {
+        "fact_lookup": "定义 对应章节",
+        "table_qa": "指标 数值 单位 表头",
+        "citation_locate": "原文出处 标题路径 章节 原文片段",
+    }
+    return hints.get(str(query_type or ""), "核心关键词 相关章节")
+
+
 def default_query_expander(question: str, expand_query_num: int) -> list[str]:
     total = max(0, int(expand_query_num))
     if total <= 0:
@@ -155,7 +164,7 @@ class ParallelQueryExecutor:
                         "retrieval_trace": trace,
                     }
 
-        query_variants = self._build_query_variants(query_text, expand_query_num, expanded_queries=expanded_queries)
+        query_variants = self._build_query_variants(query_text, expand_query_num, effective_query_type, expanded_queries=expanded_queries)
         stage_top_n = max(effective_top_k * 4, effective_top_k)
         semaphore = asyncio.Semaphore(self.max_concurrency)
         should_run_table = effective_query_type == "table_qa" or _looks_like_table_query(query_text)
@@ -245,16 +254,27 @@ class ParallelQueryExecutor:
         self,
         question: str,
         expand_query_num: int,
+        query_type: str = "fact_lookup",
         expanded_queries: Sequence[str] | None = None,
     ) -> list[str]:
+        del expand_query_num
         base = str(question or "").strip()
         if expanded_queries is None:
-            expanded = list(self.query_expander(base, expand_query_num))
+            expanded = list(self.query_expander(base, 3))
         else:
             expanded = [str(item or "").strip() for item in expanded_queries]
         variants: list[str] = []
         for item in [base] + expanded:
             value = str(item or "").strip()
+            if value and value not in variants:
+                variants.append(value)
+            if len(variants) >= 4:
+                break
+        fallback_suffixes = ["核心实体 指标 时间 动作", "精简关键词", _query_type_hint(query_type)]
+        for suffix in fallback_suffixes:
+            if len(variants) >= 4:
+                break
+            value = f"{base} {suffix}".strip()
             if value and value not in variants:
                 variants.append(value)
         return variants

@@ -18,7 +18,7 @@ llm:
     anyrouter:
       base_url: https://anyrouter.top/v1
       anthropic_base_url: https://anyrouter.top/v1
-      api_key_env: ***REMOVED_API_KEY***
+      api_key_env: ANYROUTER_API_KEY
       use_responses_api: true
       http_proxy: http://127.0.0.1:7897
       https_proxy: http://127.0.0.1:7897
@@ -98,7 +98,7 @@ chunking:
 retrieval:
   strategy: hybrid
   top_k: 5
-  expand_query_num: 3
+  expand_query_num: 4
   max_concurrency: 6
   query_timeout_seconds: 20
   table_evidence_quota: 2
@@ -119,6 +119,12 @@ reranker:
   table_boost_weight: 0.05
   top_n_factor: 4
   near_duplicate_threshold: 0.9
+  cross_encoder_enabled: true
+  cross_encoder_model: BAAI/bge-reranker-base
+  cross_encoder_candidate_pool: 30
+  cross_encoder_batch_size: 8
+  cross_encoder_max_length: 512
+  cross_encoder_local_files_only: false
 cache:
   enabled: true
   ttl_seconds: 3600

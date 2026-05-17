@@ -9,7 +9,7 @@ from service.agent.answer_generator import AnswerGenerator
 from service.agent.clarify_gate import build_clarify_question
 from service.agent.controlled_agents import IntentUnderstandingAgent, SlotFillingAgent
 from service.agent.evidence_gate import EvidenceDecisionEngine
-from service.agent.query_expander import expand_queries
+from service.agent.query_expander import FIXED_QUERY_VARIANT_TOTAL, expand_queries
 from service.agent.skill_registry import DEFAULT_SKILL_REGISTRY
 from service.embedding.embedding_service import EmbeddingService, build_embedding_provider_from_config
 from service.evaluation.ragas_evaluator import evaluate_qa_result
@@ -18,6 +18,7 @@ from service.retrieval.hybrid_retriever import HybridRetriever
 from service.retrieval.parallel_query_executor import ParallelQueryExecutor
 from service.retrieval.retrieval_cache import RetrievalResultCache
 from service.retrieval.runtime import get_runtime_repository
+from service.retrieval.two_stage_hybrid_reranker import TwoStageHybridReranker
 from service.session.session_service import get_session_service
 from utils.config_loader import get_app_config
 
@@ -38,13 +39,40 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 
 
 def _query_expander_for_executor(question: str, expand_query_num: int) -> List[str]:
-    return expand_queries(question, "fact_lookup", expand_query_num)[1:]
+    del expand_query_num
+    return expand_queries(question, "fact_lookup", FIXED_QUERY_VARIANT_TOTAL)[1:]
+
+
+def _fixed_query_variants(question: str, query_type: str, candidates: List[str] | None) -> List[str]:
+    fallback = expand_queries(question, query_type, FIXED_QUERY_VARIANT_TOTAL)
+    original = str(question or "").strip()
+    scene_variant = fallback[-1] if fallback else original
+    rewrite_pool = list(candidates or []) + fallback[1:-1]
+
+    merged: List[str] = []
+    for item in [original] + rewrite_pool:
+        value = str(item or "").strip()
+        if value and value not in merged:
+            merged.append(value)
+        if len(merged) >= FIXED_QUERY_VARIANT_TOTAL - 1:
+            break
+    scene_value = str(scene_variant or "").strip()
+    if scene_value and scene_value not in merged:
+        merged.append(scene_value)
+    for item in fallback:
+        if len(merged) >= FIXED_QUERY_VARIANT_TOTAL:
+            break
+        value = str(item or "").strip()
+        if value and value not in merged:
+            merged.append(value)
+    return merged
 
 
 class TrustedQAWorkflow:
     def __init__(self) -> None:
         self.config = get_app_config()
         retrieval_cfg = self.config.get("retrieval", {}) if isinstance(self.config.get("retrieval"), dict) else {}
+        reranker_cfg = self.config.get("reranker", {}) if isinstance(self.config.get("reranker"), dict) else {}
         cache_cfg = self.config.get("cache", {}) if isinstance(self.config.get("cache"), dict) else {}
         guard_cfg = self.config.get("guardrails", {}) if isinstance(self.config.get("guardrails"), dict) else {}
         self.session_service = get_session_service()
@@ -64,6 +92,20 @@ class TrustedQAWorkflow:
                 async_embedding_builder=lambda text_value: self.embedding_service.embed_text(text_value, use_cache=True, chunk_text=False),
                 max_concurrency=int(retrieval_cfg.get("max_concurrency", 6)),
                 query_timeout_seconds=float(retrieval_cfg.get("query_timeout_seconds", 20)),
+            ),
+            reranker=TwoStageHybridReranker(
+                dense_weight=float(reranker_cfg.get("dense_weight", 0.50)),
+                bm25_weight=float(reranker_cfg.get("bm25_weight", 0.35)),
+                metadata_boost_weight=float(reranker_cfg.get("metadata_boost_weight", 0.10)),
+                table_boost_weight=float(reranker_cfg.get("table_boost_weight", 0.05)),
+                near_duplicate_threshold=float(reranker_cfg.get("near_duplicate_threshold", 0.90)),
+                table_evidence_quota=int(retrieval_cfg.get("table_evidence_quota", 2)),
+                cross_encoder_enabled=bool(reranker_cfg.get("cross_encoder_enabled", True)),
+                cross_encoder_model=str(reranker_cfg.get("cross_encoder_model", "BAAI/bge-reranker-base")),
+                cross_encoder_candidate_pool=int(reranker_cfg.get("cross_encoder_candidate_pool", 30)),
+                cross_encoder_batch_size=int(reranker_cfg.get("cross_encoder_batch_size", 8)),
+                cross_encoder_max_length=int(reranker_cfg.get("cross_encoder_max_length", 512)),
+                cross_encoder_local_files_only=bool(reranker_cfg.get("cross_encoder_local_files_only", False)),
             ),
             table_evidence_quota=int(retrieval_cfg.get("table_evidence_quota", 2)),
         )
@@ -91,8 +133,9 @@ class TrustedQAWorkflow:
         query_type: str,
         expand_query_num: int,
     ) -> tuple[List[str], List[str] | None, bool]:
-        llm_expanded = await self.llm_service.expand_queries(question, query_type, expand_query_num)
-        expanded = llm_expanded or expand_queries(question, query_type, expand_query_num)
+        del expand_query_num
+        llm_expanded = await self.llm_service.expand_queries(question, query_type, FIXED_QUERY_VARIANT_TOTAL)
+        expanded = _fixed_query_variants(question, query_type, llm_expanded)
         return expanded, llm_expanded, bool(llm_expanded)
 
     @staticmethod
