@@ -664,8 +664,7 @@ class PgvectorRepository:
     ) -> list[Dict[str, Any]]:
         self._engine_instance()
 
-        query_tokens = coarse_tokenize(query_text)
-        if not query_tokens:
+        if not coarse_tokenize(query_text):
             return []
 
         sql = text(
@@ -675,6 +674,7 @@ class PgvectorRepository:
                 doc_id,
                 collection_name,
                 doc_source,
+                chunk_type,
                 search_text,
                 content AS raw_doc,
                 metadata_json
@@ -686,9 +686,8 @@ class PgvectorRepository:
             """
         )
 
-        token_set = set(query_tokens)
         scan_limit = max(200, int(top_k) * 40)
-        rows: list[Dict[str, Any]] = []
+        candidates: list[Dict[str, Any]] = []
         with self._engine.begin() as connection:
             records = connection.execute(
                 sql,
@@ -708,20 +707,15 @@ class PgvectorRepository:
                         metadata = {}
                 content = str(record.get("raw_doc") or "")
                 search_text = str(record.get("search_text") or content)
-                content_tokens = set(coarse_tokenize(search_text))
-                overlap = len(token_set & content_tokens)
-                score = overlap / max(1, len(token_set))
-                if query_text and query_text in search_text:
-                    score = max(score, 1.0)
-                if score <= 0:
-                    continue
-                payload = {
+                candidates.append({
                     "chunk_id": record.get("chunk_id"),
                     "doc_id": record.get("doc_id") or "",
                     "collection_name": record.get("collection_name") or collection_name,
                     "doc_source": record.get("doc_source") or "",
                     "raw_doc": content,
-                    "chunk_type": metadata.get("chunk_type") or "text",
+                    "content": content,
+                    "search_text": search_text,
+                    "chunk_type": record.get("chunk_type") or metadata.get("chunk_type") or "text",
                     "page_idx": metadata.get("page_idx"),
                     "chunk_index": metadata.get("chunk_index"),
                     "heading_path": metadata.get("heading_path") or "",
@@ -732,12 +726,15 @@ class PgvectorRepository:
                     "sub_table_id": metadata.get("sub_table_id") or "",
                     "table_header_text": metadata.get("table_header_text") or "",
                     "table_context_text": metadata.get("table_context_text") or "",
-                    "bm25_score": max(0.0, min(1.0, score)),
-                }
-                payload["score"] = payload["bm25_score"]
-                rows.append(payload)
+                })
 
-        rows.sort(key=lambda item: float(item.get("bm25_score") or 0.0), reverse=True)
-        return rows[: max(1, int(top_k))]
+        retriever = SparseBM25Retriever(k1=self._sparse_retriever.k1, b=self._sparse_retriever.b)
+        retriever.index_chunks(candidates)
+        return retriever.search(
+            query=query_text,
+            top_k=top_k,
+            collection_name=collection_name,
+            chunk_type=chunk_type,
+        )
 
 
