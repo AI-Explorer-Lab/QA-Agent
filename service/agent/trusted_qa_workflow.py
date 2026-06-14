@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from service.agent.answer_generator import AnswerGenerator
 from service.agent.clarify_gate import build_clarify_question
+from service.agent.conversation_context import ConversationContextService
 from service.agent.controlled_agents import IntentUnderstandingAgent, SlotFillingAgent
 from service.agent.evidence_gate import EvidenceDecisionEngine
 from service.agent.query_expander import FIXED_QUERY_VARIANT_TOTAL, expand_queries
@@ -78,6 +79,7 @@ class TrustedQAWorkflow:
         self.session_service = get_session_service()
         self.skill_registry = DEFAULT_SKILL_REGISTRY
         self.llm_service = get_llm_service()
+        self.conversation_context = ConversationContextService(self.llm_service)
         self.intent_agent = IntentUnderstandingAgent(self.llm_service)
         self.slot_agent = SlotFillingAgent(self.llm_service)
         self.embedding_service = EmbeddingService(provider=build_embedding_provider_from_config(self.config))
@@ -138,6 +140,24 @@ class TrustedQAWorkflow:
         expanded = _fixed_query_variants(question, query_type, llm_expanded)
         return expanded, llm_expanded, bool(llm_expanded)
 
+    async def _classify_intent(self, question: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        try:
+            return await self.intent_agent.classify(question, conversation_context=conversation_context or {})
+        except TypeError:
+            return await self.intent_agent.classify(question)
+
+    async def _fill_slots(
+        self,
+        question: str,
+        query_type: str,
+        selected_skill: Any,
+        conversation_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        try:
+            return await self.slot_agent.fill(question, query_type, selected_skill, conversation_context=conversation_context or {})
+        except TypeError:
+            return await self.slot_agent.fill(question, query_type, selected_skill)
+
     @staticmethod
     def _build_clarify_payload(
         query_type: str,
@@ -183,6 +203,7 @@ class TrustedQAWorkflow:
 
         graph = StateGraph(dict)
         graph.add_node("load_session", self._graph_load_session)
+        graph.add_node("build_conversation_context", self._graph_build_conversation_context)
         graph.add_node("understand_question", self._graph_understand_question)
         graph.add_node("fill_slots", self._graph_fill_slots)
         graph.add_node("run_clarify_gate", self._graph_run_clarify_gate)
@@ -194,7 +215,8 @@ class TrustedQAWorkflow:
         graph.add_node("persist_response", self._graph_persist_response)
 
         graph.set_entry_point("load_session")
-        graph.add_edge("load_session", "understand_question")
+        graph.add_edge("load_session", "build_conversation_context")
+        graph.add_edge("build_conversation_context", "understand_question")
         graph.add_edge("understand_question", "fill_slots")
         graph.add_edge("fill_slots", "run_clarify_gate")
         graph.add_conditional_edges(
@@ -228,9 +250,35 @@ class TrustedQAWorkflow:
         next_state.update({"session": session, "sid": sid, "observations": observations})
         return next_state
 
+    async def _graph_build_conversation_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        context = await self.conversation_context.prepare_context(
+            state.get("session") or {},
+            str(state.get("question") or ""),
+            str(state.get("collection_name") or "default"),
+        )
+        observations = list(state.get("observations") or [])
+        turn_route = dict(context.get("turn_route") or {})
+        observations.append(
+            {
+                "phase": "conversation_context",
+                "turn_type": turn_route.get("turn_type", "new_rag_query"),
+                "context_source": turn_route.get("context_source", "none"),
+                "effective_question": context.get("effective_question", state.get("question") or ""),
+                "history_refs": turn_route.get("history_refs", []),
+            }
+        )
+        return {
+            **state,
+            "conversation_state": context.get("conversation_state") or {},
+            "turn_route": turn_route,
+            "original_question": context.get("original_question") or str(state.get("question") or ""),
+            "effective_question": context.get("effective_question") or str(state.get("question") or ""),
+            "observations": observations,
+        }
+
     async def _graph_understand_question(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("question") or "")
-        intent_trace = await self.intent_agent.classify(question)
+        question = str(state.get("effective_question") or state.get("question") or "")
+        intent_trace = await self._classify_intent(question, conversation_context=state.get("turn_route") or {})
         query_type = str(intent_trace.get("query_type") or "fact_lookup")
         selected_skill = self.skill_registry.select_skill(query_type)
         skill_package = selected_skill.package_metadata()
@@ -250,10 +298,10 @@ class TrustedQAWorkflow:
         return next_state
 
     async def _graph_fill_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("question") or "")
+        question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         selected_skill = state.get("selected_skill")
-        slots = await self.slot_agent.fill(question, query_type, selected_skill)
+        slots = await self._fill_slots(question, query_type, selected_skill, conversation_context=state.get("turn_route") or {})
         observations = list(state.get("observations") or [])
         observations.append({"phase": "slot_filling_agent", "slots": slots})
         next_state = dict(state)
@@ -290,7 +338,7 @@ class TrustedQAWorkflow:
         return "clarify" if clarify.get("decision") == "clarify" else "retrieve"
 
     async def _graph_build_clarify_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("question") or "")
+        question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         clarify = dict(state.get("clarify") or {})
         answer_payload = self.answer_generator.generate(question=question, query_type=query_type, evidence=[], decision="clarify", gate_reason="missing_slots")
@@ -308,7 +356,7 @@ class TrustedQAWorkflow:
         next_state.update({"response": response, "decision": "clarify", "llm_expansion_used": False, "llm_answer_used": False})
         return next_state
     async def _graph_retrieve_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("question") or "")
+        question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         expand_query_num = int(state.get("expand_query_num") or 3)
         expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
@@ -343,7 +391,7 @@ class TrustedQAWorkflow:
 
     async def _graph_evaluate_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
         gate = await self.evidence_decision.evaluate(
-            question=str(state.get("question") or ""),
+            question=str(state.get("effective_question") or state.get("question") or ""),
             query_type=str(state.get("query_type") or "fact_lookup"),
             slots=state.get("slots") or {},
             selected_skill=str(getattr(state.get("selected_skill"), "skill_name", "")),
@@ -368,7 +416,7 @@ class TrustedQAWorkflow:
     async def _graph_retry_retrieval(self, state: Dict[str, Any]) -> Dict[str, Any]:
         retry_count = int(state.get("retry_count") or 0) + 1
         gate = dict(state.get("gate") or {})
-        retry_question = str(gate.get("suggested_retry_query") or "").strip() or str(state.get("question") or "")
+        retry_question = str(gate.get("suggested_retry_query") or "").strip() or str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         expand_query_num = max(1, int(state.get("expand_query_num") or 3))
         retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
@@ -387,7 +435,7 @@ class TrustedQAWorkflow:
         )
         evidence = list(retry_result.get("evidence") or state.get("evidence") or [])
         gate = await self.evidence_decision.evaluate(
-            question=str(state.get("question") or ""),
+            question=str(state.get("effective_question") or state.get("question") or ""),
             query_type=query_type,
             slots=state.get("slots") or {},
             selected_skill=str(getattr(state.get("selected_skill"), "skill_name", "")),
@@ -422,7 +470,7 @@ class TrustedQAWorkflow:
         return "final"
 
     async def _graph_build_answer_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("question") or "")
+        question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         gate = dict(state.get("gate") or {})
         evidence = list(state.get("evidence") or [])
@@ -479,9 +527,22 @@ class TrustedQAWorkflow:
             llm_answer_used=bool(state.get("llm_answer_used")),
             workflow_runner="langgraph",
             evaluate=response.get("decision") != "clarify",
-            question=str(state.get("question") or ""),
+            question=str(state.get("effective_question") or state.get("question") or ""),
+            original_question=str(state.get("original_question") or state.get("question") or ""),
+            effective_question=str(state.get("effective_question") or state.get("question") or ""),
+            conversation_state=state.get("conversation_state") or {},
+            turn_route=state.get("turn_route") or {},
         )
-        self._save(str(state.get("sid") or ""), str(state.get("question") or ""), response)
+        self._save(str(state.get("sid") or ""), str(state.get("original_question") or state.get("question") or ""), response)
+        self._update_conversation_focus(
+            session_id=str(state.get("sid") or ""),
+            effective_question=str(state.get("effective_question") or state.get("question") or ""),
+            query_type=str(response.get("query_type") or state.get("query_type") or "fact_lookup"),
+            slots=state.get("slots") or {},
+            response=response,
+            conversation_state=state.get("conversation_state") or {},
+            turn_route=state.get("turn_route") or {},
+        )
         next_state = dict(state)
         next_state.update({"response": response})
         return next_state
@@ -543,14 +604,26 @@ class TrustedQAWorkflow:
     ) -> Dict[str, Any]:
         session = self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
-        intent_trace = await self.intent_agent.classify(question)
+        context = await self.conversation_context.prepare_context(session, question, collection_name)
+        original_question = str(context.get("original_question") or question)
+        effective_question = str(context.get("effective_question") or question)
+        conversation_state = context.get("conversation_state") or {}
+        turn_route = context.get("turn_route") or {}
+        intent_trace = await self._classify_intent(effective_question, conversation_context=turn_route)
         query_type = str(intent_trace.get("query_type") or "fact_lookup")
         selected_skill = self.skill_registry.select_skill(query_type)
-        slots = await self.slot_agent.fill(question, query_type, selected_skill)
+        slots = await self._fill_slots(effective_question, query_type, selected_skill, conversation_context=turn_route)
         skill_package = selected_skill.package_metadata()
         clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
         observations: List[Dict[str, Any]] = [
             {"phase": "load_session", "session_id": sid},
+            {
+                "phase": "conversation_context",
+                "turn_type": turn_route.get("turn_type", "new_rag_query"),
+                "context_source": turn_route.get("context_source", "none"),
+                "effective_question": effective_question,
+                "history_refs": turn_route.get("history_refs", []),
+            },
             {"phase": "intent_understanding_agent", "intent": intent_trace},
             {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package},
             {"phase": "slot_filling_agent", "slots": slots},
@@ -563,7 +636,7 @@ class TrustedQAWorkflow:
         ]
 
         if clarify["decision"] == "clarify":
-            answer_payload = self.answer_generator.generate(question=question, query_type=query_type, evidence=[], decision="clarify", gate_reason="missing_slots")
+            answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=[], decision="clarify", gate_reason="missing_slots")
             response = self._build_response(
                 sid,
                 query_type,
@@ -585,19 +658,32 @@ class TrustedQAWorkflow:
                 llm_answer_used=False,
                 workflow_runner="python",
                 evaluate=False,
-                question=question,
+                question=effective_question,
+                original_question=original_question,
+                effective_question=effective_question,
+                conversation_state=conversation_state,
+                turn_route=turn_route,
             )
-            self._save(sid, question, response)
+            self._save(sid, original_question, response)
+            self._update_conversation_focus(
+                session_id=sid,
+                effective_question=effective_question,
+                query_type=query_type,
+                slots=slots,
+                response=response,
+                conversation_state=conversation_state,
+                turn_route=turn_route,
+            )
             return response
 
         expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
-            question,
+            effective_question,
             query_type,
             expand_query_num,
         )
 
         retrieval_result = await self.retriever.retrieve(
-            question=question,
+            question=effective_question,
             collection_name=collection_name,
             top_k=max(1, int(top_k)),
             query_type=query_type,
@@ -608,7 +694,7 @@ class TrustedQAWorkflow:
         evidence = list(retrieval_result.get("evidence") or [])
         observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
         gate = await self.evidence_decision.evaluate(
-            question=question,
+            question=effective_question,
             query_type=query_type,
             slots=slots,
             selected_skill=selected_skill.skill_name,
@@ -622,7 +708,7 @@ class TrustedQAWorkflow:
         retry_count = 0
         while gate.get("decision") == "retry" and retry_count < self.evidence_decision.retry_limit:
             retry_count += 1
-            retry_question = str(gate.get("suggested_retry_query") or "").strip() or question
+            retry_question = str(gate.get("suggested_retry_query") or "").strip() or effective_question
             retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
                 retry_question,
                 query_type,
@@ -642,7 +728,7 @@ class TrustedQAWorkflow:
             evidence = list(retry_result.get("evidence") or evidence)
             retrieval_result = retry_result
             gate = await self.evidence_decision.evaluate(
-                question=question,
+                question=effective_question,
                 query_type=query_type,
                 slots=slots,
                 selected_skill=selected_skill.skill_name,
@@ -662,11 +748,11 @@ class TrustedQAWorkflow:
         if decision not in {"answer", "clarify", "refuse"}:
             decision = "refuse"
 
-        answer_payload = self.answer_generator.generate(question=question, query_type=query_type, evidence=evidence, decision=decision, gate_reason=gate.get("reason", ""))
+        answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=evidence, decision=decision, gate_reason=gate.get("reason", ""))
         llm_answer_used = False
         if decision == "answer":
             llm_answer = await self.llm_service.generate_grounded_answer(
-                question=question,
+                question=effective_question,
                 query_type=query_type,
                 evidence=answer_payload.get("evidence", []),
                 citations=answer_payload.get("citations", []),
@@ -697,9 +783,22 @@ class TrustedQAWorkflow:
             llm_answer_used=llm_answer_used,
             workflow_runner="python",
             evaluate=True,
-            question=question,
+            question=effective_question,
+            original_question=original_question,
+            effective_question=effective_question,
+            conversation_state=conversation_state,
+            turn_route=turn_route,
         )
-        self._save(sid, question, response)
+        self._save(sid, original_question, response)
+        self._update_conversation_focus(
+            session_id=sid,
+            effective_question=effective_question,
+            query_type=query_type,
+            slots=slots,
+            response=response,
+            conversation_state=conversation_state,
+            turn_route=turn_route,
+        )
         return response
     def _apply_response_traces(
         self,
@@ -714,17 +813,47 @@ class TrustedQAWorkflow:
         workflow_runner: str,
         evaluate: bool,
         question: str,
+        original_question: str | None = None,
+        effective_question: str | None = None,
+        conversation_state: Dict[str, Any] | None = None,
+        turn_route: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        llm_trace = self.llm_service.trace_metadata()
+        trace_metadata = getattr(self.llm_service, "trace_metadata", None)
+        llm_trace = trace_metadata() if callable(trace_metadata) else {}
         llm_trace.update({"query_expansion_used": bool(llm_expansion_used), "answer_generation_used": bool(llm_answer_used)})
+        original = str(original_question or question or "")
+        effective = str(effective_question or question or "")
+        route = dict(turn_route or {})
+        state_snapshot = dict(conversation_state or {})
         response.setdefault("retrieval_trace", {})
         response.setdefault("skill_trace", {})
+        response["original_question"] = original
+        response["effective_question"] = effective
+        response["turn_type"] = route.get("turn_type", "new_rag_query")
         response["retrieval_trace"]["llm"] = llm_trace
         response["retrieval_trace"]["workflow_runner"] = workflow_runner
+        response["retrieval_trace"]["turn_routing"] = {
+            "turn_type": route.get("turn_type", "new_rag_query"),
+            "context_source": route.get("context_source", "none"),
+            "original_question": original,
+            "effective_question": effective,
+            "history_refs": route.get("history_refs", []),
+            "missing_info": route.get("missing_info", []),
+            "confidence": route.get("confidence", 0.0),
+            "reason": route.get("reason", ""),
+            "requires_clarification": bool(route.get("requires_clarification", False)),
+        }
+        response["retrieval_trace"]["conversation_state_snapshot"] = {
+            "latest_clarification_pending": state_snapshot.get("latest_clarification_pending"),
+            "conversation_focus": state_snapshot.get("conversation_focus"),
+            "recent_history_count": len(state_snapshot.get("recent_history") or []),
+            "last_citations_count": len(state_snapshot.get("last_citations") or []),
+        }
         response["skill_trace"]["tool_chain"] = list(getattr(selected_skill, "tool_chain", []))
         response["skill_trace"]["skill_package"] = skill_package
         response["skill_trace"]["intent_trace"] = intent_trace
         response["skill_trace"]["slots"] = slots
+        response["skill_trace"]["turn_routing"] = response["retrieval_trace"]["turn_routing"]
         response["retrieval_trace"]["tool_chain"] = response["skill_trace"]["tool_chain"]
         response["retrieval_trace"]["skill_package"] = skill_package
         response["retrieval_trace"]["intent_trace"] = intent_trace
@@ -784,6 +913,32 @@ class TrustedQAWorkflow:
             "react_observations": react_observations,
             "session_id": session_id,
         }
+
+    def _update_conversation_focus(
+        self,
+        session_id: str,
+        effective_question: str,
+        query_type: str,
+        slots: Dict[str, Any],
+        response: Dict[str, Any],
+        conversation_state: Dict[str, Any],
+        turn_route: Dict[str, Any],
+    ) -> None:
+        updater = getattr(self.session_service, "update_session_metadata", None)
+        if not callable(updater):
+            return
+        previous_focus = (conversation_state or {}).get("conversation_focus")
+        next_focus = self.conversation_context.build_focus_after_response(
+            previous_focus=previous_focus if isinstance(previous_focus, dict) else None,
+            effective_question=effective_question,
+            query_type=query_type,
+            slots=slots,
+            response=response,
+            turn_route=turn_route,
+        )
+        if next_focus is None:
+            return
+        updater(session_id, {"conversation_focus": next_focus})
 
     def _save(self, session_id: str, question: str, response: Dict[str, Any]) -> None:
         self.session_service.save_session(session_id=session_id, user_question=question, assistant_payload=response, retrieval_trace=response.get("retrieval_trace") or {})

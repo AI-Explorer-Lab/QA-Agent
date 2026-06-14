@@ -137,7 +137,7 @@ def _env_or_literal(value: Any) -> str:
     env_value = os.getenv(raw)
     if env_value:
         return env_value.strip()
-    if raw.startswith(("sk-", "sk_")) or (len(raw) >= 32 and not re.fullmatch(r"[A-Z0-9_]+", raw)):
+    if "*" in raw or raw.startswith(("sk-", "sk_")) or (len(raw) >= 32 and not re.fullmatch(r"[A-Z0-9_]+", raw)):
         return raw
     return ""
 
