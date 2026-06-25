@@ -33,6 +33,7 @@ class QARequest(BaseModel):
     top_k: int = 5
     expand_query_num: int = 3
     enable_cache: bool = True
+    include_debug: bool = False
 
 
 class QAResponse(BaseModel):
