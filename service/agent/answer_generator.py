@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List
 
 
@@ -8,11 +7,8 @@ def _content(row: Dict[str, Any]) -> str:
     return str(row.get("raw_doc") or row.get("content") or "").strip()
 
 
-def _clip(text: str, limit: int = 220) -> str:
-    text = re.sub(r"\s+", " ", text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
+def _answer_text(text: Any) -> str:
+    return str(text or "").strip()
 
 
 def build_evidence_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -56,7 +52,7 @@ def build_citations(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "page_idx": meta.get("page_idx"),
                 "page_range": meta.get("page_range", ""),
                 "heading_path": meta.get("heading_path", ""),
-                "quote": _clip(item.get("content", ""), 260),
+                "quote": item.get("content", ""),
                 "confidence": round(float(item.get("score") or 0.0), 4),
             }
         )
@@ -124,8 +120,8 @@ class AnswerGenerator:
         if not evidence:
             return "\u672a\u68c0\u7d22\u5230\u53ef\u7528\u4e8e\u56de\u7b54\u7684 PDF \u8bc1\u636e\u3002"
         lines = []
-        for item in evidence[:3]:
-            lines.append(f"- {_clip(item.get('content', ''), 180)} [{self._citation_label(item)}]")
+        for item in evidence:
+            lines.append(f"- {_answer_text(item.get('content', ''))} [{self._citation_label(item)}]")
         return "\u57fa\u4e8e PDF \u8bc1\u636e\uff1a\n" + "\n".join(lines)
 
     def _table_answer(self, evidence: List[Dict[str, Any]]) -> str:
@@ -134,7 +130,7 @@ class AnswerGenerator:
             if item.get("chunk_type") != "table":
                 continue
             source = self._citation_label(item)
-            lines.append(f"- \u6307\u6807/\u6570\u503c/\u5355\u4f4d/\u671f\u95f4\uff1a{_clip(item.get('content', ''), 220)} [{source}]")
+            lines.append(f"- \u6307\u6807/\u6570\u503c/\u5355\u4f4d/\u671f\u95f4\uff1a{_answer_text(item.get('content', ''))} [{source}]")
         if len(lines) == 1:
             return self._fact_answer(evidence)
         return "\n".join(lines)
@@ -143,10 +139,10 @@ class AnswerGenerator:
         if not evidence:
             return "\u672a\u627e\u5230\u53ef\u5b9a\u4f4d\u7684\u539f\u6587\u8bc1\u636e\u3002"
         lines = ["\u8bc1\u636e\u4f4d\u7f6e\u5982\u4e0b\uff1a"]
-        for item in evidence[:5]:
+        for item in evidence:
             meta = item.get("metadata", {})
             lines.append(
-                f"- \u76f8\u5173\u5185\u5bb9\uff1a{_clip(item.get('content', ''), 180)}\uff1b\u9875\u7801\uff1a{meta.get('page_idx')}\uff1b"
+                f"- \u76f8\u5173\u5185\u5bb9\uff1a{_answer_text(item.get('content', ''))}\uff1b\u9875\u7801\uff1a{meta.get('page_idx')}\uff1b"
                 f"\u6807\u9898\u8def\u5f84\uff1a{meta.get('heading_path', '')}\uff1bchunk_id\uff1a{item.get('chunk_id')} [{self._citation_label(item)}]"
             )
         return "\n".join(lines)
@@ -156,8 +152,8 @@ class AnswerGenerator:
             return "\u672a\u68c0\u7d22\u5230\u53ef\u7528\u4e8e\u603b\u7ed3\u7684 PDF \u8bc1\u636e\u3002"
         title = "\u62a5\u544a" if query_type == "report_generation" else "\u6458\u8981"
         lines = [f"{title}\uff08\u57fa\u4e8e\u68c0\u7d22\u5230\u7684 PDF \u8bc1\u636e\uff09\uff1a"]
-        for item in evidence[:5]:
-            lines.append(f"- {_clip(item.get('content', ''), 170)} [{self._citation_label(item)}]")
+        for item in evidence:
+            lines.append(f"- {_answer_text(item.get('content', ''))} [{self._citation_label(item)}]")
         return "\n".join(lines)
 
     def _compare_answer(self, evidence: List[Dict[str, Any]]) -> str:
@@ -168,7 +164,7 @@ class AnswerGenerator:
             grouped.setdefault(str(item.get("doc_source") or item.get("doc_id") or "unknown"), []).append(item)
         lines = ["\u591a\u6587\u6863\u5bf9\u6bd4\u5982\u4e0b\uff1a"]
         for source, rows in grouped.items():
-            lines.append(f"- {source}: {_clip(rows[0].get('content', ''), 180)} [{self._citation_label(rows[0])}]")
+            lines.append(f"- {source}: {_answer_text(rows[0].get('content', ''))} [{self._citation_label(rows[0])}]")
         return "\n".join(lines)
 
     @staticmethod

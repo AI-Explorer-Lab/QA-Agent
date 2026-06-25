@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
+
+import httpx
 
 from utils.config_loader import get_app_config
 
@@ -56,6 +58,13 @@ def _env_truthy(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 def _extract_json_array(text: str) -> Optional[List[str]]:
@@ -137,7 +146,7 @@ def _env_or_literal(value: Any) -> str:
     env_value = os.getenv(raw)
     if env_value:
         return env_value.strip()
-    if raw.startswith(("sk-", "sk_")) or (len(raw) >= 32 and not re.fullmatch(r"[A-Z0-9_]+", raw)):
+    if raw.startswith(("sk-", "sk_")) or not re.fullmatch(r"[A-Z0-9_]+", raw):
         return raw
     return ""
 
@@ -206,7 +215,28 @@ class LLMService:
         self.temperature = float(os.getenv("TRUSTED_QA_LLM_TEMPERATURE") or llm_cfg.get("temperature", 0.2) or 0.2)
         default_enabled = bool(llm_cfg.get("enable_real_generation", True))
         self.enabled = _env_truthy("TRUSTED_QA_ENABLE_REAL_LLM", default_enabled)
-        self.timeout_seconds = float(os.getenv("TRUSTED_QA_LLM_TIMEOUT_SECONDS") or llm_cfg.get("timeout_seconds", 30) or 30)
+        self.timeout_seconds = float(
+            os.getenv("TRUSTED_QA_LLM_TIMEOUT_SECONDS")
+            or model_cfg.get("timeout_seconds")
+            or provider_cfg.get("timeout_seconds")
+            or llm_cfg.get("timeout_seconds", 30)
+            or 30
+        )
+        configured_max_retries = (
+            os.getenv("TRUSTED_QA_LLM_MAX_RETRIES")
+            or model_cfg.get("max_retries")
+            or provider_cfg.get("max_retries")
+            or llm_cfg.get("max_retries")
+            or 2
+        )
+        self.max_retries = max(0, _safe_int(configured_max_retries, 2))
+        self.client_mode = str(
+            os.getenv("TRUSTED_QA_LLM_CLIENT_MODE")
+            or model_cfg.get("client_mode")
+            or provider_cfg.get("client_mode")
+            or llm_cfg.get("client_mode")
+            or ("direct" if provider_name.lower() == "rightcode" else "sdk")
+        ).strip().lower()
         self.use_responses_api = bool(llm_cfg.get("use_responses_api", provider_cfg.get("use_responses_api", False)))
 
         yaml_api_key = str(llm_cfg.get("api_key") or "").strip()
@@ -256,10 +286,14 @@ class LLMService:
 
     @property
     def is_available(self) -> bool:
+        if getattr(self, "client_mode", "") == "direct":
+            return bool(self.enabled and self.api_key and self.base_url)
         return bool(self.enabled and self.api_key and AsyncOpenAI is not None)
 
     @property
     def langchain_available(self) -> bool:
+        if getattr(self, "client_mode", "") == "direct":
+            return False
         return bool(self.enabled and self.api_key and ChatPromptTemplate is not None and ChatOpenAI is not None)
 
     def trace_metadata(self) -> Dict[str, Any]:
@@ -269,7 +303,10 @@ class LLMService:
             "provider": self.provider_name,
             "model": self.model,
             "base_url_set": bool(self.base_url),
+            "client_mode": self.client_mode,
             "use_responses_api": self.use_responses_api,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
             "langchain_available": self.langchain_available,
             "call_attempt_count": self.call_attempt_count,
             "last_call_mode": self.last_call_mode,
@@ -286,7 +323,7 @@ class LLMService:
                 self.last_error = "openai package is not installed"
             return None
         if self._client is None:
-            kwargs = {"api_key": self.api_key, "timeout": self.timeout_seconds}
+            kwargs = {"api_key": self.api_key, "timeout": self.timeout_seconds, "max_retries": self.max_retries}
             if self.base_url:
                 kwargs["base_url"] = self.base_url
             self._client = AsyncOpenAI(**kwargs)
@@ -301,11 +338,64 @@ class LLMService:
                 "temperature": self.temperature,
                 "api_key": self.api_key,
                 "timeout": self.timeout_seconds,
+                "max_retries": self.max_retries,
             }
             if self.base_url:
                 kwargs["base_url"] = self.base_url
             self._langchain_client = ChatOpenAI(**kwargs)
         return self._langchain_client
+
+    async def _complete_direct(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+        if not self.enabled:
+            self.last_error = "real LLM disabled by TRUSTED_QA_ENABLE_REAL_LLM or YAML"
+            return None
+        if not self.api_key:
+            self.last_error = "missing LLM API key"
+            return None
+        if not self.base_url:
+            self.last_error = "missing LLM base_url"
+            return None
+
+        self.call_attempt_count += 1
+        self.last_call_mode = "direct.chat.completions"
+        self.last_error = ""
+
+        url = self.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if not choices:
+                self.last_error = "direct chat.completions returned no choices"
+                return None
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            content = message.get("content") if isinstance(message, dict) else ""
+            if isinstance(content, list):
+                content = "\n".join(str(part.get("text") if isinstance(part, dict) else part) for part in content if str(part).strip())
+            text = str(content or "").strip()
+            if not text:
+                self.last_error = "direct chat.completions returned empty content"
+                return None
+            return text
+        except Exception as error:
+            self.last_error = "direct.chat.completions " + _safe_error(error, self.api_key)
+            return None
 
     async def structured_json(
         self,
@@ -344,6 +434,9 @@ class LLMService:
         return _extract_json_object(content or "")
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+        if self.client_mode == "direct":
+            return await self._complete_direct(system_prompt, user_prompt, max_tokens=max_tokens)
+
         if self.langchain_available:
             model = self._langchain_client_instance()
             if model is not None:
@@ -458,7 +551,7 @@ class LLMService:
             self._client_instance()
             return None
         evidence_lines = []
-        for index, item in enumerate(evidence[:8], start=1):
+        for index, item in enumerate(evidence, start=1):
             citation_id = citations[index - 1].get("citation_id", f"C{index}") if index - 1 < len(citations) else f"C{index}"
             evidence_lines.append(
                 f"[{citation_id}] doc={item.get('doc_source')} page={item.get('metadata', {}).get('page_idx')} "
@@ -467,7 +560,8 @@ class LLMService:
         system_prompt = (
             "You are a trusted enterprise PDF QA agent. Answer only from the provided evidence. "
             "Every key claim must cite citation ids like [C1]. If evidence is insufficient, say so. "
-            "For table QA, include metric, value, unit, period and source when present."
+            "For table QA, include metric, value, unit, period and source when present. "
+            "Do not use ellipses or omit cited facts by writing ...; cite the relevant evidence ids explicitly."
         )
         user_prompt = (
             f"Question: {question}\n"
