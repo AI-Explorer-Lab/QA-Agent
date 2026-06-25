@@ -256,20 +256,21 @@ class IntentUnderstandingAgent:
     def __init__(self, llm_service: Any | None = None) -> None:
         self.llm_service = llm_service
 
-    async def classify(self, question: str) -> Dict[str, Any]:
-        llm_result = await self._classify_with_llm(question)
+    async def classify(self, question: str, conversation_context: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+        llm_result = await self._classify_with_llm(question, conversation_context=conversation_context)
         if llm_result is not None:
             return llm_result
         query_type = self._fallback_query_type(question)
         return self._build_result(query_type, source="rule_fallback", reason="Matched the closest fixed intent group.")
 
-    async def _classify_with_llm(self, question: str) -> Dict[str, Any] | None:
+    async def _classify_with_llm(self, question: str, conversation_context: Mapping[str, Any] | None = None) -> Dict[str, Any] | None:
         groups = {key: sorted(values) for key, values in INTENT_KEYWORD_GROUPS.items()}
         parsed = await _safe_structured_json(
             self.llm_service,
             "Classify the user intent into exactly one allowed query_type. Return only JSON.",
             {
                 "question": question,
+                "conversation_context": dict(conversation_context or {}),
                 "allowed_query_types": sorted(QUERY_TYPE_SET),
                 "keyword_groups": groups,
                 "schema": {
@@ -324,9 +325,15 @@ class SlotFillingAgent:
     def __init__(self, llm_service: Any | None = None) -> None:
         self.llm_service = llm_service
 
-    async def fill(self, question: str, query_type: str, skill: SkillDefinition | None = None) -> Dict[str, Any]:
+    async def fill(
+        self,
+        question: str,
+        query_type: str,
+        skill: SkillDefinition | None = None,
+        conversation_context: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         rule_slots = self._rule_slots(question, query_type, skill)
-        llm_slots = await self._fill_with_llm(question, query_type, rule_slots, skill)
+        llm_slots = await self._fill_with_llm(question, query_type, rule_slots, skill, conversation_context=conversation_context)
         merged = _merge_slots(rule_slots, llm_slots)
         if skill is not None:
             merged["__skill_name__"] = skill.skill_name
@@ -359,6 +366,7 @@ class SlotFillingAgent:
         query_type: str,
         rule_slots: Mapping[str, Any],
         skill: SkillDefinition | None = None,
+        conversation_context: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
         skill_payload = skill.package_metadata() if skill is not None else {}
         parsed = await _safe_structured_json(
@@ -368,6 +376,7 @@ class SlotFillingAgent:
                 "question": question,
                 "query_type": query_type,
                 "skill_package": skill_payload,
+                "conversation_context": dict(conversation_context or {}),
                 "fixed_schema": {key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
                 "rule_slots": dict(rule_slots),
                 "instructions": "Respect the selected skill package slot schema. Do not add new fields. Use empty strings or empty lists when absent.",
@@ -700,5 +709,4 @@ def merge_audit_and_rule_gate(rule_gate: Mapping[str, Any], audit: Mapping[str, 
     if audit_payload.get("missing_aspects"):
         merged.setdefault("missing_aspects", audit_payload["missing_aspects"])
     return merged
-
 

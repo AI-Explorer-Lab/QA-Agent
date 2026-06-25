@@ -130,6 +130,10 @@ class SessionService:
                             "citations": assistant_payload.get("citations") or [],
                             "evaluation": evaluation,
                             "skill_trace": assistant_payload.get("skill_trace") or {},
+                            "original_question": assistant_payload.get("original_question") or user_question,
+                            "effective_question": assistant_payload.get("effective_question") or user_question,
+                            "turn_type": assistant_payload.get("turn_type") or "",
+                            "turn_routing": (assistant_payload.get("retrieval_trace") or {}).get("turn_routing") or {},
                         }
                     ),
                     "retrieval_trace_id": trace_id,
@@ -221,7 +225,7 @@ class SessionService:
                            citations_json, evidence_json, metadata_json, retrieval_trace_id, created_at
                     FROM qa_messages
                     WHERE session_id = :session_id
-                    ORDER BY id ASC
+                    ORDER BY created_at ASC, message_id ASC
                     """
                 ),
                 {"session_id": sid},
@@ -233,7 +237,7 @@ class SessionService:
                            retrieval_trace_json, rerank_trace_json, selected_candidates_json, created_at
                     FROM retrieval_traces
                     WHERE session_id = :session_id
-                    ORDER BY id ASC
+                    ORDER BY created_at ASC, trace_id ASC
                     """
                 ),
                 {"session_id": sid},
@@ -280,11 +284,36 @@ class SessionService:
         return {
             "session_id": session.get("session_id"),
             "collection_name": session.get("collection_name") or "default",
+            "metadata": _json_loads(session.get("metadata_json"), {}),
             "created_at": session.get("created_at").isoformat() if session.get("created_at") else "",
             "updated_at": session.get("updated_at").isoformat() if session.get("updated_at") else "",
             "messages": messages,
             "retrieval_traces": traces,
         }
+
+    def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]) -> None:
+        sid = _clean_str(session_id)
+        if not sid:
+            return
+        with self.engine.begin() as connection:
+            current = connection.execute(
+                text("SELECT metadata_json FROM qa_sessions WHERE session_id = :session_id"),
+                {"session_id": sid},
+            ).scalar()
+            payload = _json_loads(current, {})
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.update(dict(metadata or {}))
+            connection.execute(
+                text(
+                    """
+                    UPDATE qa_sessions
+                    SET metadata_json = CAST(:metadata_json AS jsonb), updated_at = NOW()
+                    WHERE session_id = :session_id
+                    """
+                ),
+                {"session_id": sid, "metadata_json": _json_dumps(payload)},
+            )
 
     def upsert_collection_chunks(
         self,
@@ -310,7 +339,7 @@ class SessionService:
                            chunk_type, chunk_index, heading_path, content AS raw_doc, metadata_json
                     FROM pdf_chunks
                     WHERE collection_name = :collection_name
-                    ORDER BY id ASC
+                    ORDER BY doc_source ASC, chunk_index ASC, chunk_id ASC
                     """
                 ),
                 {"collection_name": cname},
