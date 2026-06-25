@@ -35,9 +35,16 @@ def _clean_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _clean_secret(value: Any) -> str:
+    text = _clean_str(value)
+    if not text or text.startswith("***REMOVED"):
+        return ""
+    return text
+
+
 def _first_nonempty(*values: Any) -> str:
     for value in values:
-        text = _clean_str(value)
+        text = _clean_secret(value)
         if text:
             return text
     return ""
@@ -91,6 +98,16 @@ def build_embedding_provider_from_config(config: Dict[str, Any] | None = None) -
     model = str(runtime["model"]).strip()
     api_key = str(runtime["api_key"]).strip()
     timeout_seconds = float(runtime["timeout_seconds"])
+
+    if provider_name in {"deterministic", "deterministic_hash_embedding", "local", "none"}:
+        log_operation_event(
+            "index.embedding.provider",
+            status="selected",
+            provider="deterministic_hash_embedding",
+            model="deterministic_hash_embedding",
+            reason="local_embedding_provider",
+        )
+        return None
 
     if provider_name not in {"qwen", "dashscope"}:
         log_operation_event(
