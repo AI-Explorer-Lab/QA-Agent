@@ -33,3 +33,4 @@ tmp_pip_proxy/
 项目解读/
 log/
 tests/
+.claude/
