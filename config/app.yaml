@@ -30,7 +30,7 @@ llm:
         gpt-5-codex:
           model: gpt-5-codex
           use_responses_api: true
-      api_key: ***REMOVED_API_KEY***
+      api_key: ""
     deepseek:
       base_url: https://api.deepseek.com/v1
       api_key_env: DEEPSEEK_API_KEY
@@ -60,13 +60,13 @@ embedding:
   provider: qwen
   model: text-embedding-v4
   dimension: 1024
-  api_key: ***REMOVED_API_KEY***
+  api_key: ""
   api_key_env: QWEN_API_KEY
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 storage:
   backend: pgvector
   pgvector:
-    database_url: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa
+    database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
     embedding_dim: 1024
   local_dev:
     enabled: false
@@ -141,12 +141,12 @@ guardrails:
 api_keys:
   openai_api_key: ''
   deepseek_api_key: ''
-  qwen_api_key: ***REMOVED_API_KEY***
+  qwen_api_key: ""
   zhipuai_api_key: ''
   anthropic_api_key: ''
-  mineru_api_key: ***REMOVED_JWT***
+  mineru_api_key: ""
   mineru_api_key_env: MinerU_API_KEY
 vector:
   backend: pgvector
-  pgvector_database_url: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa
+  pgvector_database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
   pgvector_embedding_dim: 1024
