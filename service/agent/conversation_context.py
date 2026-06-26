@@ -380,6 +380,32 @@ class ConversationContextService:
 
     async def prepare_context(self, session: Mapping[str, Any], current_question: str, collection_name: str) -> Dict[str, Any]:
         state = self.build_state(session, current_question, collection_name)
+        if (
+            not state.get("recent_history")
+            and not state.get("latest_clarification_pending")
+            and not state.get("conversation_focus")
+            and not state.get("last_evidence")
+            and not state.get("last_citations")
+        ):
+            question = _clean_str(current_question)
+            route = {
+                "turn_type": "new_rag_query",
+                "should_use_history": False,
+                "context_source": "none",
+                "effective_question": question,
+                "history_refs": [],
+                "missing_info": [],
+                "confidence": 1.0,
+                "reason": "No conversation history; skipped LLM turn routing.",
+                "requires_clarification": False,
+                "policy_reason": "new_session_fast_path",
+            }
+            return {
+                "conversation_state": state,
+                "turn_route": route,
+                "original_question": question,
+                "effective_question": question,
+            }
         route = await self.route_turn(state)
         policy_route = self.apply_policy(state, route)
         return {

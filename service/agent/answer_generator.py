@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 
@@ -11,9 +12,82 @@ def _answer_text(text: Any) -> str:
     return str(text or "").strip()
 
 
-def build_evidence_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _safe_int(value: Any, default: int = 10**9) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_for_match(text: Any) -> str:
+    return re.sub(r"\s+", "", str(text or "").lower())
+
+
+def _entity_terms(question: str) -> List[str]:
+    raw = str(question or "")
+    raw = re.sub(r"^(请|麻烦)?(分别)?(告诉我|介绍|说明|查询|帮我看一下)", "", raw).strip()
+    raw = re.split(r"(?:的)?(?:简介|公司简介|历史沿革|概况|基本情况)", raw, maxsplit=1)[0]
+    terms: List[str] = []
+    for part in re.split(r"[、,，;；]|和|与|及", raw):
+        item = re.sub(r"^(请|麻烦)?(分别)?(告诉我|介绍|说明|查询|帮我看一下)", "", part).strip(" ：:。")
+        if len(item) >= 2 and item not in terms:
+            terms.append(item)
+    return terms
+
+
+def _entity_order(row: Dict[str, Any], question: str) -> int:
+    haystack = _normalize_for_match(
+        " ".join(
+            [
+                row.get("doc_source", ""),
+                row.get("doc_id", ""),
+                row.get("heading_path", ""),
+                _content(row)[:800],
+            ]
+        )
+    )
+    for index, term in enumerate(_entity_terms(question)):
+        normalized = _normalize_for_match(term)
+        short = re.sub(r"(股份有限公司|有限责任公司|有限公司|公司)$", "", normalized)
+        if normalized and normalized in haystack:
+            return index
+        if short and len(short) >= 2 and short in haystack:
+            return index
+    return 10**6
+
+
+def _section_order(row: Dict[str, Any]) -> int:
+    text = _normalize_for_match(" ".join([row.get("heading_path", ""), _content(row)[:1200]]))
+    if any(key in text for key in ("公司基本情况", "公司简介", "公司概况", "中文名称", "法定代表人", "注册地址")):
+        return 10
+    if "历史沿革" in text:
+        return 20
+    if any(key in text for key in ("股票简况", "证券代码", "上市交易所")):
+        return 40
+    if any(key in text for key in ("财务报表", "资产负债表", "利润表", "现金流量表")):
+        return 90
+    return 50
+
+
+def order_evidence_rows_for_answer(rows: List[Dict[str, Any]], question: str = "") -> List[Dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _entity_order(row, question),
+            str(row.get("doc_source") or row.get("doc_id") or ""),
+            _section_order(row),
+            _safe_int(row.get("page_idx")),
+            _safe_int(row.get("chunk_index")),
+            -float(row.get("final_score") or row.get("score") or 0.0),
+        ),
+    )
+
+
+def build_evidence_payload(rows: List[Dict[str, Any]], question: str = "") -> List[Dict[str, Any]]:
     evidence = []
-    for index, row in enumerate(rows, start=1):
+    for index, row in enumerate(order_evidence_rows_for_answer(rows, question), start=1):
         content = _content(row)
         item = {
             "evidence_id": f"E{index}",
@@ -27,6 +101,7 @@ def build_evidence_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "metadata": {
                 "page_idx": row.get("page_idx"),
                 "page_range": row.get("page_range", ""),
+                "chunk_index": row.get("chunk_index"),
                 "heading_path": row.get("heading_path", ""),
                 "collection_name": row.get("collection_name", ""),
                 "source_channels": row.get("source_channels", []),
@@ -68,8 +143,7 @@ class AnswerGenerator:
         decision: str = "answer",
         gate_reason: str = "",
     ) -> Dict[str, Any]:
-        del question
-        evidence_payload = build_evidence_payload(evidence)
+        evidence_payload = build_evidence_payload(evidence, question=question)
         citations = build_citations(evidence_payload)
 
         if decision == "clarify":
@@ -166,6 +240,16 @@ class AnswerGenerator:
         for source, rows in grouped.items():
             lines.append(f"- {source}: {_answer_text(rows[0].get('content', ''))} [{self._citation_label(rows[0])}]")
         return "\n".join(lines)
+
+    def llm_generation_failed_answer(self, evidence: List[Dict[str, Any]], error: str = "") -> str:
+        if not evidence:
+            return "已完成检索，但没有可用于生成答案的 PDF 证据。"
+        citation_ids = ", ".join(f"[{self._citation_label(item)}]" for item in evidence[:5])
+        suffix = f"失败原因：{error}" if error else "请查看调试信息中的 retrieval_trace.llm.last_error。"
+        return (
+            "已检索到 PDF 证据，但 LLM 最终答案生成失败，因此没有返回综合答案。"
+            f"可用证据引用：{citation_ids}。{suffix}"
+        )
 
     @staticmethod
     def _clarify_answer(query_type: str, gate_reason: str) -> str:

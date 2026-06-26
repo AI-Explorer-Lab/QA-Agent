@@ -379,6 +379,46 @@ class PgvectorRepository:
             row.setdefault("score", float(row.get("bm25_score") or 0.0))
         return result
 
+    def keyword_search_many(
+        self,
+        collection_name: str,
+        query_texts: Sequence[str],
+        top_k: int,
+        chunk_type: str | None = None,
+        table_only: bool = False,
+    ) -> Dict[str, list[Dict[str, Any]]]:
+        effective_chunk_type = "table" if table_only else chunk_type
+        queries = [str(query or "").strip() for query in query_texts if coarse_tokenize(str(query or ""))]
+        if not queries:
+            return {}
+
+        if self.backend == "pgvector":
+            candidates = self._keyword_candidates_pgvector(
+                collection_name=collection_name,
+                top_k=top_k,
+                chunk_type=effective_chunk_type,
+            )
+        else:
+            candidates = []
+            for chunk in self._local_chunks:
+                if collection_name and str(chunk.get("collection_name") or "") != collection_name:
+                    continue
+                if effective_chunk_type and str(chunk.get("chunk_type") or "") != effective_chunk_type:
+                    continue
+                candidates.append(dict(chunk))
+
+        retriever = SparseBM25Retriever(k1=self._sparse_retriever.k1, b=self._sparse_retriever.b)
+        retriever.index_chunks(candidates)
+        return {
+            query: retriever.search(
+                query=query,
+                top_k=top_k,
+                collection_name=collection_name,
+                chunk_type=effective_chunk_type,
+            )
+            for query in queries
+        }
+
     def table_search(self, collection_name: str, query_text: str, top_k: int) -> list[Dict[str, Any]]:
         return self.keyword_search(
             collection_name=collection_name,
@@ -667,6 +707,29 @@ class PgvectorRepository:
         if not coarse_tokenize(query_text):
             return []
 
+        candidates = self._keyword_candidates_pgvector(
+            collection_name=collection_name,
+            top_k=top_k,
+            chunk_type=chunk_type,
+        )
+
+        retriever = SparseBM25Retriever(k1=self._sparse_retriever.k1, b=self._sparse_retriever.b)
+        retriever.index_chunks(candidates)
+        return retriever.search(
+            query=query_text,
+            top_k=top_k,
+            collection_name=collection_name,
+            chunk_type=chunk_type,
+        )
+
+    def _keyword_candidates_pgvector(
+        self,
+        collection_name: str,
+        top_k: int,
+        chunk_type: str | None,
+    ) -> list[Dict[str, Any]]:
+        self._engine_instance()
+
         sql = text(
             """
             SELECT
@@ -728,13 +791,6 @@ class PgvectorRepository:
                     "table_context_text": metadata.get("table_context_text") or "",
                 })
 
-        retriever = SparseBM25Retriever(k1=self._sparse_retriever.k1, b=self._sparse_retriever.b)
-        retriever.index_chunks(candidates)
-        return retriever.search(
-            query=query_text,
-            top_k=top_k,
-            collection_name=collection_name,
-            chunk_type=chunk_type,
-        )
+        return candidates
 
 

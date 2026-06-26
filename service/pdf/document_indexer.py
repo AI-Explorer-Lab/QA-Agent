@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import logging
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from exception.business_exception import ValidationException
 from middlewares.operation_log import (
@@ -20,6 +20,22 @@ from service.retrieval.runtime import get_runtime_repository, replace_collection
 from service.session.session_service import get_session_service
 from utils.config_loader import get_app_config
 from utils.hash_utils import short_hash
+
+ProgressCallback = Callable[[str, str, Dict[str, Any]], None]
+
+
+def _notify_progress(
+    callback: ProgressCallback | None,
+    event: str,
+    status: str,
+    **fields: Any,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event, status, {key: value for key, value in fields.items() if value is not None})
+    except Exception:
+        logging.getLogger(__name__).debug("index progress callback failed", exc_info=True)
 
 
 def _page_range_to_text(value: Any) -> str:
@@ -98,6 +114,7 @@ class DocumentIndexingService:
         collection_name: str = "default",
         doc_source: str | None = None,
         force_rebuild: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         collection = (collection_name or "default").strip() or "default"
         overall_timer = start_operation_step(
@@ -108,13 +125,22 @@ class DocumentIndexingService:
         )
         try:
             collect_timer = start_operation_step("index.collect_documents", pdf_path=pdf_path)
+            _notify_progress(progress_callback, "index.collect_documents", "started", pdf_path=pdf_path)
             try:
                 pdf_documents = collect_pdf_documents(pdf_path)
             except Exception as exc:
+                _notify_progress(progress_callback, "index.collect_documents", "failed", error=str(exc))
                 fail_operation_step(collect_timer, exc)
                 raise
             finish_operation_step(
                 collect_timer,
+                document_count=len(pdf_documents),
+                total_size_bytes=sum(document.size_bytes for document in pdf_documents),
+            )
+            _notify_progress(
+                progress_callback,
+                "index.collect_documents",
+                "completed",
                 document_count=len(pdf_documents),
                 total_size_bytes=sum(document.size_bytes for document in pdf_documents),
             )
@@ -195,6 +221,13 @@ class DocumentIndexingService:
                         use_cache=True,
                         force_rebuild=force_rebuild,
                     )
+                    _notify_progress(
+                        progress_callback,
+                        "index.ocr",
+                        "started",
+                        doc_id=doc_id,
+                        doc_source=doc_source_value,
+                    )
                     try:
                         payload = self.mineru_client.parse_pdf_to_mineru_json(
                             pdf_doc.path,
@@ -202,11 +235,21 @@ class DocumentIndexingService:
                             force_rebuild=force_rebuild,
                         )
                     except Exception as exc:
+                        _notify_progress(progress_callback, "index.ocr", "failed", doc_id=doc_id, error=str(exc))
                         fail_operation_step(ocr_timer, exc, doc_id=doc_id)
                         raise
                     page_count = len(payload.get("pdf_info") or [])
                     finish_operation_step(
                         ocr_timer,
+                        doc_id=doc_id,
+                        parser_source=payload.get("source", "unknown"),
+                        page_count=page_count,
+                        block_count=_count_mineru_blocks(payload),
+                    )
+                    _notify_progress(
+                        progress_callback,
+                        "index.ocr",
+                        "completed",
                         doc_id=doc_id,
                         parser_source=payload.get("source", "unknown"),
                         page_count=page_count,
@@ -218,6 +261,13 @@ class DocumentIndexingService:
                         doc_id=doc_id,
                         page_count=page_count,
                     )
+                    _notify_progress(
+                        progress_callback,
+                        "index.chunking",
+                        "started",
+                        doc_id=doc_id,
+                        page_count=page_count,
+                    )
                     try:
                         chunks = self.chunker.chunk_mineru_payload(
                             mineru_payload=payload,
@@ -226,11 +276,21 @@ class DocumentIndexingService:
                             doc_source=doc_source_value,
                         )
                     except Exception as exc:
+                        _notify_progress(progress_callback, "index.chunking", "failed", doc_id=doc_id, error=str(exc))
                         fail_operation_step(chunk_timer, exc, doc_id=doc_id)
                         raise
                     chunk_counts = _chunk_type_counts(chunks)
                     finish_operation_step(
                         chunk_timer,
+                        doc_id=doc_id,
+                        chunk_count=len(chunks),
+                        text_chunks=chunk_counts.get("text", 0),
+                        table_chunks=chunk_counts.get("table", 0),
+                    )
+                    _notify_progress(
+                        progress_callback,
+                        "index.chunking",
+                        "completed",
                         doc_id=doc_id,
                         chunk_count=len(chunks),
                         text_chunks=chunk_counts.get("text", 0),
@@ -268,6 +328,13 @@ class DocumentIndexingService:
                         text_count=len(texts),
                         max_concurrency=6,
                     )
+                    _notify_progress(
+                        progress_callback,
+                        "index.embedding",
+                        "started",
+                        doc_id=doc_id,
+                        text_count=len(texts),
+                    )
                     try:
                         vectors = await self.embedding_service.embed_texts(
                             texts,
@@ -276,6 +343,7 @@ class DocumentIndexingService:
                             max_concurrency=6,
                         )
                     except Exception as exc:
+                        _notify_progress(progress_callback, "index.embedding", "failed", doc_id=doc_id, error=str(exc))
                         fail_operation_step(embedding_timer, exc, doc_id=doc_id)
                         raise
                     if len(vectors) != len(chunks):
@@ -288,6 +356,7 @@ class DocumentIndexingService:
                             },
                         )
                         fail_operation_step(embedding_timer, exc, doc_id=doc_id)
+                        _notify_progress(progress_callback, "index.embedding", "failed", doc_id=doc_id, error=str(exc))
                         raise exc
                     finish_operation_step(
                         embedding_timer,
@@ -296,6 +365,15 @@ class DocumentIndexingService:
                         embedding_dim=len(vectors[0]) if vectors else 0,
                         embedding_provider=getattr(self.embedding_service, "provider_name", "unknown"),
                         embedding_model=getattr(self.embedding_service, "provider_model", ""),
+                    )
+                    _notify_progress(
+                        progress_callback,
+                        "index.embedding",
+                        "completed",
+                        doc_id=doc_id,
+                        vector_count=len(vectors),
+                        embedding_dim=len(vectors[0]) if vectors else 0,
+                        embedding_provider=getattr(self.embedding_service, "provider_name", "unknown"),
                     )
 
                     normalized_chunks: List[Dict[str, Any]] = []
@@ -381,6 +459,14 @@ class DocumentIndexingService:
                 effective_vector_backend=effective_backend,
                 chunk_count=len(all_chunks),
             )
+            _notify_progress(
+                progress_callback,
+                "index.database",
+                "started",
+                collection_name=collection,
+                chunk_count=len(all_chunks),
+                effective_vector_backend=effective_backend,
+            )
             try:
                 if force_rebuild:
                     indexed_count = replace_collection_chunks(collection, all_chunks)
@@ -399,10 +485,20 @@ class DocumentIndexingService:
                     force_rebuild=force_rebuild,
                 )
             except Exception as exc:
+                _notify_progress(progress_callback, "index.database", "failed", collection_name=collection, error=str(exc))
                 fail_operation_step(database_timer, exc)
                 raise
             finish_operation_step(
                 database_timer,
+                indexed_chunks=indexed_count,
+                session_collection_chunks=session_result.get("chunk_count"),
+                persistent_database_write=True,
+            )
+            _notify_progress(
+                progress_callback,
+                "index.database",
+                "completed",
+                collection_name=collection,
                 indexed_chunks=indexed_count,
                 session_collection_chunks=session_result.get("chunk_count"),
                 persistent_database_write=True,

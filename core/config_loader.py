@@ -13,11 +13,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.yaml"
 DEFAULT_PROVIDER_KEY_ENV = {
     "anyrouter": "OPENAI_API_KEY",
+    "rightcode": "RIGHTCODE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "qwen": "QWEN_API_KEY",
     "zhipu": "ZHIPUAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+}
+MANAGED_LLM_ENV_KEYS = {
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_MODEL_KEY",
+    "LLM_MODEL_SELECTOR",
+    "LLM_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_API_KEY_ENV",
+    "LLM_USE_RESPONSES_API",
+    "TRUSTED_QA_LLM_MODEL",
+    "TRUSTED_QA_LLM_TEMPERATURE",
+    "TRUSTED_QA_ENABLE_REAL_LLM",
+    "TRUSTED_QA_LLM_TIMEOUT_SECONDS",
+    "TRUSTED_QA_LLM_MAX_RETRIES",
+    "TRUSTED_QA_LLM_CLIENT_MODE",
+    "RIGHTCODE_API_KEY",
 }
 MODEL_SELECTOR_KEYS = (
     "current_model",
@@ -210,6 +229,17 @@ def _resolve_llm_values(llm_config: Dict[str, Any]) -> Dict[str, str]:
         _pick_llm_value("use_responses_api", llm_config, provider_block, model_block),
         default=False,
     )
+    temperature = _clean_str(_pick_llm_value("temperature", llm_config, provider_block, model_block))
+    enable_real_generation = _clean_str(
+        _pick_llm_value("enable_real_generation", llm_config, provider_block, model_block)
+    )
+    timeout_seconds = _clean_str(
+        _pick_llm_value("timeout_seconds", llm_config, provider_block, model_block)
+    )
+    max_retries = _clean_str(
+        _pick_llm_value("max_retries", llm_config, provider_block, model_block)
+    )
+    client_mode = _clean_str(_pick_llm_value("client_mode", llm_config, provider_block, model_block))
 
     resolved_selector = selector
     if not resolved_selector and provider_name and model_key:
@@ -225,6 +255,14 @@ def _resolve_llm_values(llm_config: Dict[str, Any]) -> Dict[str, str]:
         "LLM_API_KEY": api_key,
         "LLM_API_KEY_ENV": api_key_env,
         "LLM_USE_RESPONSES_API": str(use_responses_api).lower(),
+        "TRUSTED_QA_LLM_MODEL": model,
+        "TRUSTED_QA_LLM_TEMPERATURE": temperature,
+        "TRUSTED_QA_ENABLE_REAL_LLM": str(_as_bool(enable_real_generation, default=True)).lower()
+        if enable_real_generation
+        else "",
+        "TRUSTED_QA_LLM_TIMEOUT_SECONDS": timeout_seconds,
+        "TRUSTED_QA_LLM_MAX_RETRIES": max_retries,
+        "TRUSTED_QA_LLM_CLIENT_MODE": client_mode,
         "HTTP_PROXY": http_proxy,
         "HTTPS_PROXY": https_proxy,
         "ALL_PROXY": all_proxy,
@@ -235,6 +273,8 @@ def _resolve_llm_values(llm_config: Dict[str, Any]) -> Dict[str, str]:
         "all_proxy": all_proxy,
         "no_proxy": no_proxy,
     }
+    if api_key and api_key_env:
+        resolved[api_key_env] = api_key
     return {k: _clean_str(v) for k, v in resolved.items() if _clean_str(v)}
 
 
@@ -327,7 +367,10 @@ def load_runtime_env() -> Dict[str, str]:
     yaml_env = _map_to_env(yaml_config)
 
     for env_key, env_value in yaml_env.items():
-        os.environ.setdefault(env_key, env_value)
+        if env_key in MANAGED_LLM_ENV_KEYS:
+            os.environ[env_key] = env_value
+        else:
+            os.environ.setdefault(env_key, env_value)
 
     return yaml_env
 

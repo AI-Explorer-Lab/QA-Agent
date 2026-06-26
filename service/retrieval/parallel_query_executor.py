@@ -169,7 +169,9 @@ class ParallelQueryExecutor:
         semaphore = asyncio.Semaphore(self.max_concurrency)
         should_run_table = effective_query_type == "table_qa" or _looks_like_table_query(query_text)
 
-        tasks: list[asyncio.Task[Dict[str, Any]]] = []
+        tasks: list[asyncio.Task[Any]] = []
+        bm25_queries: list[str] = []
+        table_queries: list[str] = []
         for variant in query_variants:
             tasks.append(
                 asyncio.create_task(
@@ -182,31 +184,42 @@ class ParallelQueryExecutor:
                     )
                 )
             )
+            bm25_queries.append(variant)
+            if should_run_table:
+                table_queries.append(variant)
+
+        if bm25_queries:
             tasks.append(
                 asyncio.create_task(
-                    self._run_route_task(
+                    self._run_sparse_route_batch(
                         route="bm25",
-                        query=variant,
+                        queries=bm25_queries,
                         collection_name=collection_name,
                         top_k=stage_top_n,
                         semaphore=semaphore,
                     )
                 )
             )
-            if should_run_table:
-                tasks.append(
-                    asyncio.create_task(
-                        self._run_route_task(
-                            route="table",
-                            query=variant,
-                            collection_name=collection_name,
-                            top_k=max(effective_top_k * 3, effective_top_k),
-                            semaphore=semaphore,
-                        )
+        if table_queries:
+            tasks.append(
+                asyncio.create_task(
+                    self._run_sparse_route_batch(
+                        route="table",
+                        queries=table_queries,
+                        collection_name=collection_name,
+                        top_k=max(effective_top_k * 3, effective_top_k),
+                        semaphore=semaphore,
                     )
                 )
+            )
 
-        raw_task_results = await asyncio.gather(*tasks)
+        gathered_results = await asyncio.gather(*tasks)
+        raw_task_results: list[Dict[str, Any]] = []
+        for result in gathered_results:
+            if isinstance(result, list):
+                raw_task_results.extend(result)
+            else:
+                raw_task_results.append(result)
         merged_candidates = self._merge_candidates(raw_task_results)
 
         retrieval_trace = {
@@ -233,6 +246,7 @@ class ParallelQueryExecutor:
                     "timed_out": item["timed_out"],
                     "error": item["error"],
                     "returned": item["returned"],
+                    "shared_index": bool(item.get("shared_index", False)),
                 }
                 for item in raw_task_results
             ],
@@ -249,6 +263,46 @@ class ParallelQueryExecutor:
             self.retrieval_cache.set(cache_key, payload)
 
         return payload
+
+    def get_cached_result(
+        self,
+        question: str,
+        collection_name: str,
+        top_k: int,
+        query_type: str,
+    ) -> Dict[str, Any] | None:
+        if self.retrieval_cache is None:
+            return None
+
+        query_text = str(question or "").strip()
+        question_hash = stable_sha256(query_text)
+        repository_revision = int(getattr(self.repository, "revision", 0) or 0)
+        try:
+            repository_collection_count = int(self.repository.count_collection_chunks(collection_name))
+        except Exception:
+            repository_collection_count = -1
+        cache_hash = f"{question_hash}:r{repository_revision}:c{repository_collection_count}"
+        cache_key = self.retrieval_cache.build_key(
+            collection_name=collection_name,
+            question_hash=cache_hash,
+            query_type=str(query_type or "fact_lookup"),
+            top_k=max(1, int(top_k)),
+        )
+        cached = self.retrieval_cache.get(cache_key)
+        if cached is None:
+            return None
+
+        trace = dict(cached.get("retrieval_trace") or {})
+        trace["cache_hit"] = True
+        trace["cache_key"] = cache_key.as_storage_key()
+        trace["repository_revision"] = repository_revision
+        trace["repository_collection_count"] = repository_collection_count
+        trace["cached_at"] = trace.get("generated_at")
+        trace["generated_at"] = time.time()
+        return {
+            "candidates": list(cached.get("candidates") or []),
+            "retrieval_trace": trace,
+        }
 
     def _build_query_variants(
         self,
@@ -319,6 +373,84 @@ class ParallelQueryExecutor:
             "error": error,
             "returned": len(items),
             "items": items,
+        }
+
+    async def _run_sparse_route_batch(
+        self,
+        route: str,
+        queries: Sequence[str],
+        collection_name: str,
+        top_k: int,
+        semaphore: asyncio.Semaphore,
+    ) -> list[Dict[str, Any]]:
+        started = time.perf_counter()
+        result_map: Dict[str, list[Dict[str, Any]]] = {}
+        timed_out = False
+        error = ""
+
+        async with semaphore:
+            try:
+                result_map = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._execute_sparse_batch_sync,
+                        route,
+                        queries,
+                        collection_name,
+                        top_k,
+                    ),
+                    timeout=self.query_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                result_map = {}
+            except Exception as exc:  # pragma: no cover - defensive safety path.
+                error = str(exc)
+                result_map = {}
+
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        results: list[Dict[str, Any]] = []
+        for query in queries:
+            items = list(result_map.get(query) or [])
+            results.append(
+                {
+                    "route": route,
+                    "query": query,
+                    "duration_ms": duration_ms,
+                    "timed_out": timed_out,
+                    "error": error,
+                    "returned": len(items),
+                    "items": items,
+                    "shared_index": True,
+                }
+            )
+        return results
+
+    def _execute_sparse_batch_sync(
+        self,
+        route: str,
+        queries: Sequence[str],
+        collection_name: str,
+        top_k: int,
+    ) -> Dict[str, list[Dict[str, Any]]]:
+        if route == "table":
+            raw = self.repository.keyword_search_many(
+                collection_name=collection_name,
+                query_texts=queries,
+                top_k=top_k,
+                chunk_type="table",
+                table_only=True,
+            )
+        else:
+            raw = self.repository.keyword_search_many(
+                collection_name=collection_name,
+                query_texts=queries,
+                top_k=top_k,
+                chunk_type=None,
+                table_only=False,
+            )
+        return {
+            query: [self._normalize_route_item(row, route, collection_name) for row in rows]
+            for query, rows in raw.items()
         }
 
     async def _execute_route_async(

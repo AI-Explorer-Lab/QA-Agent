@@ -71,6 +71,11 @@ def _extract_json_array(text: str) -> Optional[List[str]]:
     raw = (text or "").strip()
     if not raw:
         return None
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1).strip()
+
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
@@ -90,8 +95,36 @@ def _extract_json_array(text: str) -> Optional[List[str]]:
             if isinstance(parsed, list):
                 return [str(item).strip() for item in parsed if str(item).strip()]
         except Exception:
-            return None
-    return None
+            pass
+
+    object_match = re.search(r"\{[\s\S]*\}", raw)
+    if object_match:
+        try:
+            parsed = json.loads(object_match.group(0))
+            if isinstance(parsed, dict):
+                for key in ("queries", "expanded_queries", "items"):
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        return [str(item).strip() for item in value if str(item).strip()]
+        except Exception:
+            pass
+
+    line_queries: List[str] = []
+    for line in raw.splitlines():
+        value = re.sub(r"^\s*(?:[-*•]|\d+[.)、:]|[（(]?\d+[）)])\s*", "", line).strip()
+        value = value.strip("\"'“”‘’`，,。;；")
+        if not value:
+            continue
+        if value.startswith(("[", "]", "{", "}")):
+            continue
+        lowered = value.lower()
+        if lowered.startswith(("here are", "queries", "expanded queries", "json")):
+            continue
+        if value not in line_queries:
+            line_queries.append(value)
+        if len(line_queries) >= 4:
+            break
+    return line_queries or None
 
 
 def _extract_json_object(text: str) -> Dict[str, Any] | None:
@@ -345,7 +378,13 @@ class LLMService:
             self._langchain_client = ChatOpenAI(**kwargs)
         return self._langchain_client
 
-    async def _complete_direct(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+    async def _complete_direct(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 512,
+        model_override: str | None = None,
+    ) -> Optional[str]:
         if not self.enabled:
             self.last_error = "real LLM disabled by TRUSTED_QA_ENABLE_REAL_LLM or YAML"
             return None
@@ -362,7 +401,7 @@ class LLMService:
 
         url = self.base_url.rstrip("/") + "/chat/completions"
         payload = {
-            "model": self.model,
+            "model": str(model_override or self.model),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -433,9 +472,15 @@ class LLMService:
         content = await self.complete(system_prompt, user_prompt, max_tokens=max_tokens)
         return _extract_json_object(content or "")
 
-    async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> Optional[str]:
+    async def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 512,
+        model_override: str | None = None,
+    ) -> Optional[str]:
         if self.client_mode == "direct":
-            return await self._complete_direct(system_prompt, user_prompt, max_tokens=max_tokens)
+            return await self._complete_direct(system_prompt, user_prompt, max_tokens=max_tokens, model_override=model_override)
 
         if self.langchain_available:
             model = self._langchain_client_instance()
@@ -472,7 +517,7 @@ class LLMService:
             try:
                 self.last_call_mode = "responses"
                 response = await client.responses.create(
-                    model=self.model,
+                    model=str(model_override or self.model),
                     input=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -490,7 +535,7 @@ class LLMService:
         try:
             self.last_call_mode = "chat.completions"
             response = await client.chat.completions.create(
-                model=self.model,
+                model=str(model_override or self.model),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -509,6 +554,14 @@ class LLMService:
         self.last_error = "; ".join(errors)[:1000] if errors else "LLM returned empty response"
         return None
 
+    def _query_expansion_model(self) -> str:
+        configured = str(os.getenv("TRUSTED_QA_QUERY_EXPANSION_MODEL") or "").strip()
+        if configured:
+            return configured
+        if self.provider_name.lower() == "deepseek" and self.model != "deepseek-chat":
+            return "deepseek-chat"
+        return self.model
+
     async def expand_queries(self, question: str, query_type: str, expand_query_num: int) -> Optional[List[str]]:
         if not (self.is_available or self.langchain_available):
             self._client_instance()
@@ -517,7 +570,8 @@ class LLMService:
         total = 4
         system_prompt = (
             "You rewrite enterprise PDF QA questions for hybrid retrieval. "
-            "Return only a JSON array of concise retrieval queries. Do not answer the question."
+            "Return valid JSON only: an array of exactly four retrieval query strings. "
+            "Do not answer the question and do not extract values."
         )
         user_prompt = (
             f"Question: {question}\n"
@@ -525,9 +579,16 @@ class LLMService:
             "Return exactly 4 Chinese-friendly search queries: the original question first, "
             "then two concise noise-reduced rewrite variants, then one query_type scene-enhanced variant. "
             "Keep named entities, years, metrics, table headers and document targets. "
-            "Do not add page numbers unless the original question already contains them."
+            "Do not add page numbers unless the original question already contains them. "
+            "Each item must be a complete search query, not a field name, value, unit, or answer. "
+            "Output format example: [\"2025 operating revenue\", \"2025 revenue table\", \"operating revenue value unit 2025\", \"table_qa operating revenue metric 2025\"]"
         )
-        content = await self.complete(system_prompt, user_prompt, max_tokens=320)
+        content = await self.complete(
+            system_prompt,
+            user_prompt,
+            max_tokens=320,
+            model_override=self._query_expansion_model(),
+        )
         queries = _extract_json_array(content or "")
         if not queries:
             return None
@@ -561,15 +622,18 @@ class LLMService:
             "You are a trusted enterprise PDF QA agent. Answer only from the provided evidence. "
             "Every key claim must cite citation ids like [C1]. If evidence is insufficient, say so. "
             "For table QA, include metric, value, unit, period and source when present. "
-            "Do not use ellipses or omit cited facts by writing ...; cite the relevant evidence ids explicitly."
+            "Do not use ellipses or omit cited facts by writing ...; cite the relevant evidence ids explicitly. "
+            "The evidence is pre-ordered by requested entity and document section. Preserve that logical order. "
+            "Do not put history before profile. Do not include unrelated financial statement sections unless the user asks for them. "
+            "Do not output raw TABLE_START or TABLE_END markers; render useful tables as normal Markdown tables."
         )
         user_prompt = (
             f"Question: {question}\n"
             f"Query type: {query_type}\n"
             "Evidence:\n" + "\n".join(evidence_lines) + "\n"
-            "Write the final answer in Chinese."
+            "Write the final answer in Chinese. Do not simply list evidence snippets; synthesize them into the requested structure."
         )
-        answer = await self.complete(system_prompt, user_prompt, max_tokens=900)
+        answer = await self.complete(system_prompt, user_prompt, max_tokens=1600)
         if not answer or not answer.strip():
             return None
         return answer.strip()

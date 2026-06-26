@@ -252,11 +252,63 @@ def _is_covered(value: Any, corpus: str) -> bool:
     return overlap / max(1, len(tokens)) >= 0.5
 
 
+def _contains_keyword(text: str, keywords: set[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _keyword_query_type(question: str) -> str | None:
+    normalized = _clean_str(question).lower()
+    if not normalized:
+        return "ambiguous_query"
+
+    # Keep the same precedence as the fixed classifier so rule-first behavior
+    # remains predictable when a question contains multiple intent hints.
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["multi_doc_compare"]):
+        return "multi_doc_compare"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["report_generation"]):
+        return "report_generation"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["citation_locate"]):
+        return "citation_locate"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["table_qa"]):
+        return "table_qa"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["summarization"]):
+        return "summarization"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["fact_lookup"]):
+        return "fact_lookup"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["ambiguous_query"]):
+        return "ambiguous_query"
+    return None
+
+
+def _slots_have_value(slots: Mapping[str, Any]) -> bool:
+    for key in SLOT_KEYS:
+        value = slots.get(key)
+        if isinstance(value, list) and value:
+            return True
+        if not isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _rule_slots_sufficient(slots: Mapping[str, Any], skill: SkillDefinition | None) -> bool:
+    if skill is None:
+        return _slots_have_value(slots)
+    return not skill.get_missing_slots(dict(slots))
+
+
 class IntentUnderstandingAgent:
     def __init__(self, llm_service: Any | None = None) -> None:
         self.llm_service = llm_service
 
     async def classify(self, question: str, conversation_context: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+        rule_query_type = _keyword_query_type(question)
+        if rule_query_type is not None:
+            return self._build_result(
+                rule_query_type,
+                source="rule_keyword",
+                reason="Matched a fixed intent keyword; skipped LLM classification.",
+            )
+
         llm_result = await self._classify_with_llm(question, conversation_context=conversation_context)
         if llm_result is not None:
             return llm_result
@@ -333,8 +385,13 @@ class SlotFillingAgent:
         conversation_context: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
         rule_slots = self._rule_slots(question, query_type, skill)
-        llm_slots = await self._fill_with_llm(question, query_type, rule_slots, skill, conversation_context=conversation_context)
-        merged = _merge_slots(rule_slots, llm_slots)
+        if _rule_slots_sufficient(rule_slots, skill):
+            merged = _merge_slots(rule_slots, None)
+            merged["__slot_fill_source__"] = "rule"
+        else:
+            llm_slots = await self._fill_with_llm(question, query_type, rule_slots, skill, conversation_context=conversation_context)
+            merged = _merge_slots(rule_slots, llm_slots)
+            merged["__slot_fill_source__"] = "llm" if llm_slots is not None else "rule_fallback"
         if skill is not None:
             merged["__skill_name__"] = skill.skill_name
             merged["__missing_required__"] = skill.get_missing_slots(merged)

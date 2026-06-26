@@ -56,6 +56,7 @@ def _compact_qa_response(response: dict[str, Any]) -> dict[str, Any]:
             "citation_count": len(citations),
             "repository_collection_count": retrieval_trace.get("repository_collection_count", 0),
             "workflow_runner": retrieval_trace.get("workflow_runner", ""),
+            "progress_stages": retrieval_trace.get("progress_stages", []),
         },
     }
 

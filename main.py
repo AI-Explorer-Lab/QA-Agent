@@ -32,6 +32,7 @@ load_runtime_env()
 
 from controller.apis import router
 from middlewares.exception_handler import app_exception_handler
+from middlewares.operation_log import log_operation_event
 from middlewares.request_log import RequestLogMiddleware
 from utils.config_loader import get_app_config
 
@@ -40,6 +41,34 @@ app = FastAPI(title=config.get("app", {}).get("name", "trusted-pdf-qa"))
 app.add_middleware(RequestLogMiddleware)
 app.add_exception_handler(Exception, app_exception_handler)
 app.include_router(router)
+
+
+@app.on_event("startup")
+async def preload_runtime_models() -> None:
+    reranker_cfg = config.get("reranker", {}) if isinstance(config.get("reranker"), dict) else {}
+    if not bool(reranker_cfg.get("cross_encoder_preload_on_startup", False)):
+        return
+    try:
+        import asyncio
+
+        from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
+
+        workflow = get_trusted_qa_workflow()
+        reranker = getattr(getattr(workflow, "retriever", None), "reranker", None)
+        warmup = getattr(reranker, "warmup_cross_encoder", None)
+        if not callable(warmup):
+            log_operation_event("runtime.cross_encoder_preload", status="skipped", reason="warmup_unavailable")
+            return
+        log_operation_event("runtime.cross_encoder_preload", status="started")
+        result = await asyncio.to_thread(warmup)
+        log_operation_event("runtime.cross_encoder_preload", **result)
+    except Exception as exc:
+        log_operation_event(
+            "runtime.cross_encoder_preload",
+            status="failed",
+            error_type=type(exc).__name__,
+            error=str(exc)[:500],
+        )
 
 
 

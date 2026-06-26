@@ -159,6 +159,7 @@ class TwoStageHybridReranker:
         cross_encoder_batch_size: int = 8,
         cross_encoder_max_length: int = 512,
         cross_encoder_local_files_only: bool = False,
+        cross_encoder_load_on_request: bool = False,
         cross_encoder_scorer: Any | None = None,
     ) -> None:
         self.dense_weight = float(dense_weight)
@@ -173,6 +174,7 @@ class TwoStageHybridReranker:
         self.cross_encoder_batch_size = max(1, int(cross_encoder_batch_size))
         self.cross_encoder_max_length = max(16, int(cross_encoder_max_length))
         self.cross_encoder_local_files_only = bool(cross_encoder_local_files_only)
+        self.cross_encoder_load_on_request = bool(cross_encoder_load_on_request)
         self._cross_encoder_scorer = cross_encoder_scorer
         self._cross_encoder_load_failed = ""
 
@@ -366,6 +368,9 @@ class TwoStageHybridReranker:
             return self._cross_encoder_scorer
         if self._cross_encoder_load_failed:
             return None
+        if not self.cross_encoder_load_on_request:
+            self._cross_encoder_load_failed = "cross_encoder_not_preloaded"
+            return None
 
         scorer = TransformersCrossEncoderScorer(
             model_name=self.cross_encoder_model,
@@ -378,6 +383,30 @@ class TwoStageHybridReranker:
             return None
         self._cross_encoder_scorer = scorer
         return self._cross_encoder_scorer
+
+    def warmup_cross_encoder(self) -> Dict[str, Any]:
+        if not self.cross_encoder_enabled:
+            return {"status": "disabled", "model": self.cross_encoder_model}
+        previous_load_on_request = self.cross_encoder_load_on_request
+        if self._cross_encoder_load_failed == "cross_encoder_not_preloaded":
+            self._cross_encoder_load_failed = ""
+        self.cross_encoder_load_on_request = True
+        try:
+            scorer = self._get_cross_encoder_scorer()
+        finally:
+            self.cross_encoder_load_on_request = previous_load_on_request
+        if scorer is None:
+            return {
+                "status": "fallback",
+                "reason": self._cross_encoder_load_failed or "scorer_unavailable",
+                "model": self.cross_encoder_model,
+            }
+        return {
+            "status": "loaded",
+            "model": self.cross_encoder_model,
+            "device": getattr(scorer, "_device", "unknown"),
+            "local_files_only": self.cross_encoder_local_files_only,
+        }
 
     def _merge_unique(
         self,

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import time
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -108,6 +109,7 @@ class TrustedQAWorkflow:
                 cross_encoder_batch_size=int(reranker_cfg.get("cross_encoder_batch_size", 8)),
                 cross_encoder_max_length=int(reranker_cfg.get("cross_encoder_max_length", 512)),
                 cross_encoder_local_files_only=bool(reranker_cfg.get("cross_encoder_local_files_only", False)),
+                cross_encoder_load_on_request=bool(reranker_cfg.get("cross_encoder_load_on_request", False)),
             ),
             table_evidence_quota=int(retrieval_cfg.get("table_evidence_quota", 2)),
         )
@@ -121,6 +123,10 @@ class TrustedQAWorkflow:
         )
         self.answer_generator = AnswerGenerator()
         self.table_evidence_quota = int(retrieval_cfg.get("table_evidence_quota", 2))
+        self.query_expansion_cache_enabled = bool(cache_cfg.get("query_expansion_cache_enabled", cache_cfg.get("enabled", True)))
+        self.query_expansion_cache_ttl_seconds = max(1, int(cache_cfg.get("query_expansion_cache_ttl_seconds", cache_cfg.get("ttl_seconds", 3600))))
+        self.query_expansion_cache_max_items = max(1, int(cache_cfg.get("query_expansion_cache_max_items", min(int(cache_cfg.get("max_items", 5000)), 1024))))
+        self._query_expansion_cache: Dict[tuple[str, str, int], tuple[float, List[str], List[str]]] = {}
         workflow_cfg = self.config.get("workflow", {}) if isinstance(self.config.get("workflow"), dict) else {}
         self.langgraph_enabled = _env_truthy(
             "TRUSTED_QA_ENABLE_LANGGRAPH",
@@ -128,6 +134,39 @@ class TrustedQAWorkflow:
         )
         self.langgraph_available = StateGraph is not None
         self._langgraph_app: Optional[Any] = None
+
+    @staticmethod
+    def _query_expansion_cache_key(question: str, query_type: str, expand_query_num: int) -> tuple[str, str, int]:
+        return (str(question or "").strip(), str(query_type or "fact_lookup").strip(), max(1, int(expand_query_num)))
+
+    def _get_cached_query_expansion(self, question: str, query_type: str, expand_query_num: int) -> tuple[List[str], List[str]] | None:
+        if not self.query_expansion_cache_enabled:
+            return None
+        key = self._query_expansion_cache_key(question, query_type, expand_query_num)
+        cached = self._query_expansion_cache.get(key)
+        if cached is None:
+            return None
+        cached_at, expanded, llm_expanded = cached
+        if time.time() - cached_at > self.query_expansion_cache_ttl_seconds:
+            self._query_expansion_cache.pop(key, None)
+            return None
+        return list(expanded), list(llm_expanded)
+
+    def _store_query_expansion_cache(
+        self,
+        question: str,
+        query_type: str,
+        expand_query_num: int,
+        expanded: List[str],
+        llm_expanded: List[str] | None,
+    ) -> None:
+        if not self.query_expansion_cache_enabled or not llm_expanded:
+            return
+        if len(self._query_expansion_cache) >= self.query_expansion_cache_max_items:
+            oldest_key = min(self._query_expansion_cache.items(), key=lambda item: item[1][0])[0]
+            self._query_expansion_cache.pop(oldest_key, None)
+        key = self._query_expansion_cache_key(question, query_type, expand_query_num)
+        self._query_expansion_cache[key] = (time.time(), list(expanded), list(llm_expanded))
 
     async def _expand_queries_for_retrieval(
         self,
@@ -139,6 +178,82 @@ class TrustedQAWorkflow:
         llm_expanded = await self.llm_service.expand_queries(question, query_type, FIXED_QUERY_VARIANT_TOTAL)
         expanded = _fixed_query_variants(question, query_type, llm_expanded)
         return expanded, llm_expanded, bool(llm_expanded)
+
+    async def _retrieve_with_cache_aware_expansion(
+        self,
+        question: str,
+        collection_name: str,
+        top_k: int,
+        query_type: str,
+        expand_query_num: int,
+        enable_cache: bool,
+    ) -> tuple[Dict[str, Any], List[str], List[str] | None, bool, Dict[str, Any]]:
+        started = time.perf_counter()
+        effective_top_k = max(1, int(top_k))
+        effective_expand_num = max(1, int(expand_query_num))
+        cache_precheck_hit = False
+        query_expansion_cache_hit = False
+        expanded: List[str]
+        llm_expanded: List[str] | None
+        llm_expansion_used: bool
+
+        cached_stage1 = None
+        if enable_cache:
+            cached_stage1 = self.retriever.get_cached_stage1(
+                question=question,
+                collection_name=collection_name,
+                top_k=effective_top_k,
+                query_type=query_type,
+            )
+
+        if cached_stage1 is not None:
+            cache_precheck_hit = True
+            trace = dict(cached_stage1.get("retrieval_trace") or {})
+            cached_variants = trace.get("query_variants") or trace.get("expanded_queries")
+            expanded = [str(item or "").strip() for item in list(cached_variants or []) if str(item or "").strip()]
+            if not expanded:
+                expanded = _fixed_query_variants(question, query_type, None)
+            llm_expanded = None
+            llm_expansion_used = False
+        else:
+            cached_expansion = self._get_cached_query_expansion(question, query_type, effective_expand_num) if enable_cache else None
+            if cached_expansion is not None:
+                query_expansion_cache_hit = True
+                expanded, _cached_llm_expanded = cached_expansion
+                llm_expanded = None
+                llm_expansion_used = False
+            else:
+                expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
+                    question,
+                    query_type,
+                    effective_expand_num,
+                )
+                if enable_cache:
+                    self._store_query_expansion_cache(question, query_type, effective_expand_num, expanded, llm_expanded)
+
+        retrieval_result = await self.retriever.retrieve(
+            question=question,
+            collection_name=collection_name,
+            top_k=effective_top_k,
+            query_type=query_type,
+            expand_query_num=effective_expand_num,
+            enable_cache=enable_cache,
+            expanded_queries=expanded,
+        )
+        trace = retrieval_result.setdefault("retrieval_trace", {})
+        trace["query_expansion_skipped"] = "retrieval_cache_hit" if cache_precheck_hit else ("query_expansion_cache_hit" if query_expansion_cache_hit else "")
+        trace["query_expansion_cache_hit"] = bool(query_expansion_cache_hit)
+        trace["llm_query_expansion_used"] = bool(llm_expansion_used)
+        stage = {
+            "phase": "parallel_hybrid_retrieval",
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "cache_precheck_hit": cache_precheck_hit,
+            "query_expansion_cache_hit": query_expansion_cache_hit,
+            "cache_hit": bool(trace.get("cache_hit", False)),
+            "llm_query_expansion_used": bool(llm_expansion_used),
+            "query_variant_count": len(expanded),
+        }
+        return retrieval_result, expanded, llm_expanded, llm_expansion_used, stage
 
     async def _classify_intent(self, question: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
         try:
@@ -359,23 +474,17 @@ class TrustedQAWorkflow:
         question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         expand_query_num = int(state.get("expand_query_num") or 3)
-        expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
-            question,
-            query_type,
-            expand_query_num,
-        )
-        retrieval_result = await self.retriever.retrieve(
+        retrieval_result, expanded, llm_expanded, llm_expansion_used, retrieval_stage = await self._retrieve_with_cache_aware_expansion(
             question=question,
             collection_name=str(state.get("collection_name") or "default"),
             top_k=max(1, int(state.get("top_k") or 5)),
             query_type=query_type,
-            expand_query_num=max(1, expand_query_num),
+            expand_query_num=expand_query_num,
             enable_cache=bool(state.get("enable_cache", True)),
-            expanded_queries=expanded,
         )
         evidence = list(retrieval_result.get("evidence") or [])
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
+        observations.append({**retrieval_stage, "evidence_count": len(evidence)})
         next_state = dict(state)
         next_state.update(
             {
@@ -493,6 +602,12 @@ class TrustedQAWorkflow:
             if llm_answer:
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
+            else:
+                answer_payload["answer"] = self.answer_generator.llm_generation_failed_answer(
+                    answer_payload.get("evidence", []),
+                    error=str(getattr(self.llm_service, "last_error", "") or ""),
+                )
+                answer_payload["confidence"] = min(float(answer_payload.get("confidence") or 0.0), 0.2)
         response = self._build_response(
             str(state.get("sid") or ""),
             query_type,
@@ -676,23 +791,16 @@ class TrustedQAWorkflow:
             )
             return response
 
-        expanded, llm_expanded, llm_expansion_used = await self._expand_queries_for_retrieval(
-            effective_question,
-            query_type,
-            expand_query_num,
-        )
-
-        retrieval_result = await self.retriever.retrieve(
+        retrieval_result, expanded, llm_expanded, llm_expansion_used, retrieval_stage = await self._retrieve_with_cache_aware_expansion(
             question=effective_question,
             collection_name=collection_name,
             top_k=max(1, int(top_k)),
             query_type=query_type,
             expand_query_num=max(1, int(expand_query_num)),
             enable_cache=enable_cache,
-            expanded_queries=expanded,
         )
         evidence = list(retrieval_result.get("evidence") or [])
-        observations.append({"phase": "parallel_hybrid_retrieval", "evidence_count": len(evidence)})
+        observations.append({**retrieval_stage, "evidence_count": len(evidence)})
         gate = await self.evidence_decision.evaluate(
             question=effective_question,
             query_type=query_type,
@@ -760,6 +868,12 @@ class TrustedQAWorkflow:
             if llm_answer:
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
+            else:
+                answer_payload["answer"] = self.answer_generator.llm_generation_failed_answer(
+                    answer_payload.get("evidence", []),
+                    error=str(getattr(self.llm_service, "last_error", "") or ""),
+                )
+                answer_payload["confidence"] = min(float(answer_payload.get("confidence") or 0.0), 0.2)
         response = self._build_response(
             sid,
             query_type,
@@ -894,6 +1008,24 @@ class TrustedQAWorkflow:
         if gate:
             trace.setdefault("gate_decision", gate)
         react_observations = observations or []
+        progress_stages = []
+        for item in react_observations:
+            if not isinstance(item, dict):
+                continue
+            phase = str(item.get("phase") or "").strip()
+            if not phase:
+                continue
+            progress_stages.append(
+                {
+                    "phase": phase,
+                    "status": "completed",
+                    "duration_ms": int(item.get("duration_ms") or 0),
+                    "cache_hit": bool(item.get("cache_hit", False)),
+                    "llm_query_expansion_used": bool(item.get("llm_query_expansion_used", False)),
+                    "evidence_count": int(item.get("evidence_count") or 0),
+                }
+            )
+        trace.setdefault("progress_stages", progress_stages)
         skill_trace = {
             "selected_skill": selected_skill,
             "tool_chain": trace.get("tool_chain", []),
