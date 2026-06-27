@@ -8,6 +8,7 @@ from service.agent.clarify_gate import extract_slots
 from service.agent.query_classifier import (
     _CITATION_KEYWORDS,
     _COMPARE_KEYWORDS,
+    _FACT_LOOKUP_KEYWORDS,
     _REPORT_KEYWORDS,
     _SUMMARY_KEYWORDS,
     _TABLE_KEYWORDS,
@@ -33,7 +34,7 @@ INTENT_KEYWORD_GROUPS: Dict[str, set[str]] = {
     "citation_locate": set(_CITATION_KEYWORDS),
     "report_generation": set(_REPORT_KEYWORDS),
     "multi_doc_compare": set(_COMPARE_KEYWORDS),
-    "fact_lookup": {"fact", "lookup", "definition", "clause"},
+    "fact_lookup": set(_FACT_LOOKUP_KEYWORDS) | {"fact", "lookup", "definition", "clause"},
     "ambiguous_query": {"ambiguous", "missing context", "unclear"},
 }
 
@@ -269,12 +270,12 @@ def _keyword_query_type(question: str) -> str | None:
         return "report_generation"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["citation_locate"]):
         return "citation_locate"
+    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["fact_lookup"]):
+        return "fact_lookup"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["table_qa"]):
         return "table_qa"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["summarization"]):
         return "summarization"
-    if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["fact_lookup"]):
-        return "fact_lookup"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["ambiguous_query"]):
         return "ambiguous_query"
     return None

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 from domain.qa import QARequest
 from exception import CollectionNotFoundException, ValidationException
@@ -11,6 +14,7 @@ from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
 from service.retrieval.runtime import get_runtime_repository
 
 router = APIRouter()
+STREAM_WAITING_MESSAGE = "正在生成答案，请稍等......"
 
 
 def _source_name(doc_source: Any) -> str:
@@ -61,14 +65,22 @@ def _compact_qa_response(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@router.post("/qa/ask")
-async def ask(request: QARequest):
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _validate_qa_request(request: QARequest) -> str:
     collection_name = str(request.collection_name or "").strip()
     if not collection_name:
         raise ValidationException("collection_name is required", detail={"collection_name": request.collection_name})
     if get_runtime_repository().count_collection_chunks(collection_name) <= 0:
         raise CollectionNotFoundException(collection_name)
-    response = await get_trusted_qa_workflow().ask(
+    return collection_name
+
+
+async def _run_qa(request: QARequest, collection_name: str) -> dict[str, Any]:
+    return await get_trusted_qa_workflow().ask(
         question=request.question,
         session_id=request.session_id or None,
         collection_name=collection_name,
@@ -76,6 +88,66 @@ async def ask(request: QARequest):
         expand_query_num=request.expand_query_num,
         enable_cache=request.enable_cache,
     )
+
+
+@router.post("/qa/ask")
+async def ask(request: QARequest):
+    collection_name = _validate_qa_request(request)
+    response = await _run_qa(request, collection_name)
     if request.include_debug:
         return response
     return _compact_qa_response(response)
+
+
+@router.post("/qa/ask/stream")
+async def ask_stream(request: QARequest):
+    collection_name = _validate_qa_request(request)
+
+    async def event_stream():
+        yield _sse_event(
+            "status",
+            {
+                "message": STREAM_WAITING_MESSAGE,
+                "stage": "started",
+                "collection_name": collection_name,
+            },
+        )
+        task = asyncio.create_task(_run_qa(request, collection_name))
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=5)
+                if done:
+                    break
+                yield _sse_event(
+                    "status",
+                    {
+                        "message": STREAM_WAITING_MESSAGE,
+                        "stage": "running",
+                        "collection_name": collection_name,
+                    },
+                )
+            response = await task
+            payload = response if request.include_debug else _compact_qa_response(response)
+            yield _sse_event("final", payload)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        except Exception as exc:
+            yield _sse_event(
+                "error",
+                {
+                    "code": "INTERNAL_ERROR",
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

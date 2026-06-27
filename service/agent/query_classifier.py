@@ -6,7 +6,6 @@ from service.agent.schemas import normalize_query_type
 from utils.content_normalizer import normalize_whitespace
 
 _TABLE_KEYWORDS = {
-    "表",
     "表格",
     "指标",
     "数据",
@@ -20,6 +19,19 @@ _TABLE_KEYWORDS = {
     "参数",
     "table",
     "metric",
+}
+
+_FACT_LOOKUP_KEYWORDS = {
+    "中文名称",
+    "中文简称",
+    "法定代表人",
+    "注册地址",
+    "办公地址",
+    "公司网址",
+    "电子信箱",
+    "股票简称",
+    "股票代码",
+    "上市板块",
 }
 
 _SUMMARY_KEYWORDS = {
@@ -84,6 +96,9 @@ def classify_query_type(question: str) -> str:
 
     if _contains_any(normalized, _CITATION_KEYWORDS):
         return "citation_locate"
+
+    if _contains_any(normalized, _FACT_LOOKUP_KEYWORDS):
+        return "fact_lookup"
 
     if _contains_any(normalized, _TABLE_KEYWORDS):
         return "table_qa"

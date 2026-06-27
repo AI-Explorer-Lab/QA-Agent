@@ -5,8 +5,10 @@ from typing import Any, Dict, List
 
 from utils.content_normalizer import normalize_whitespace
 
-_YEAR_RE = re.compile(r"(19|20)\d{2}")
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 _QUOTED_TEXT_RE = re.compile(r"[\"'“”‘’《](.+?)[\"'“”‘’》]")
+_VALUE_QUESTION_RE = re.compile(r"(?:^|[？?，,；;。])\s*([^？?，,；;。]+?)(?:分别)?(?:是|为|有|达到)?多少")
+_LEADING_TIME_RE = re.compile(r"^(?:在)?(?:19|20)\d{2}年(?:度|末|全年|上半年|下半年|一季度|二季度|三季度|四季度)?(?:的)?")
 _METRIC_WORDS = [
     "收入",
     "利润",
@@ -21,6 +23,25 @@ _METRIC_WORDS = [
 ]
 
 
+def _clean_metric_candidate(value: str) -> str:
+    text = normalize_whitespace(value, preserve_newlines=False).strip(" ：:，,。；;？?")
+    text = re.sub(r"^(?:请问|请查询|查询|统计|计算|告诉我|其中|包括|包含|以及|并且|和|、)\s*", "", text)
+    text = _LEADING_TIME_RE.sub("", text).strip(" 的：:，,。；;？?")
+    text = re.sub(r"(?:分别)$", "", text).strip(" 的：:，,。；;？?")
+    if len(text) < 2:
+        return ""
+    return text
+
+
+def _extract_value_question_metrics(text: str) -> List[str]:
+    metrics: List[str] = []
+    for match in _VALUE_QUESTION_RE.finditer(text):
+        metric = _clean_metric_candidate(match.group(1))
+        if metric and metric not in metrics:
+            metrics.append(metric)
+    return metrics
+
+
 def extract_slots(question: str, query_type: str) -> Dict[str, Any]:
     text = normalize_whitespace(question, preserve_newlines=False)
     lowered = text.lower()
@@ -28,7 +49,9 @@ def extract_slots(question: str, query_type: str) -> Dict[str, Any]:
     years = _YEAR_RE.findall(text)
     quoted = [item.strip() for item in _QUOTED_TEXT_RE.findall(text) if item.strip()]
 
-    metrics = [word for word in _METRIC_WORDS if word in lowered]
+    metrics = _extract_value_question_metrics(text)
+    if not metrics:
+        metrics = [word for word in _METRIC_WORDS if word in lowered]
 
     compare_targets: List[str] = []
     if "和" in text:
@@ -44,7 +67,7 @@ def extract_slots(question: str, query_type: str) -> Dict[str, Any]:
 
     slots: Dict[str, Any] = {
         "years": years,
-        "metric": metrics[0] if metrics else "",
+        "metric": "、".join(metrics) if metrics else "",
         "period": years[0] if years else "",
         "target_statement": quoted[0] if quoted else "",
         "compare_targets": compare_targets,
