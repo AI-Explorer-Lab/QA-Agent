@@ -78,6 +78,10 @@ def _usable_llm_answer(answer: Any) -> bool:
     return text not in incomplete_endings
 
 
+def _duration_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
+
+
 class TrustedQAWorkflow:
     def __init__(self) -> None:
         self.config = get_app_config()
@@ -297,6 +301,7 @@ class TrustedQAWorkflow:
         expand_query_num: int,
         enable_cache: bool,
     ) -> Dict[str, Any]:
+        workflow_started_at = time.perf_counter()
         return {
             "question": question,
             "collection_name": collection_name,
@@ -306,6 +311,7 @@ class TrustedQAWorkflow:
             "enable_cache": bool(enable_cache),
             "retry_count": 0,
             "observations": [],
+            "workflow_started_at": workflow_started_at,
         }
 
     def _langgraph_app_instance(self) -> Optional[Any]:
@@ -353,15 +359,17 @@ class TrustedQAWorkflow:
         return self._langgraph_app
 
     async def _graph_load_session(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         session = self.session_service.load_session(state.get("session_id"), collection_name=str(state.get("collection_name") or "default"))
         sid = session["session_id"]
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "load_session", "session_id": sid})
+        observations.append({"phase": "load_session", "session_id": sid, "duration_ms": _duration_ms(started_at)})
         next_state = dict(state)
         next_state.update({"session": session, "sid": sid, "observations": observations})
         return next_state
 
     async def _graph_build_conversation_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         context = await self.conversation_context.prepare_context(
             state.get("session") or {},
             str(state.get("question") or ""),
@@ -376,6 +384,7 @@ class TrustedQAWorkflow:
                 "context_source": turn_route.get("context_source", "none"),
                 "effective_question": context.get("effective_question", state.get("question") or ""),
                 "history_refs": turn_route.get("history_refs", []),
+                "duration_ms": _duration_ms(started_at),
             }
         )
         return {
@@ -389,15 +398,18 @@ class TrustedQAWorkflow:
 
     async def _graph_understand_intent_and_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("effective_question") or state.get("question") or "")
+        started_at = time.perf_counter()
         understanding = await self._understand_question(question, conversation_context=state.get("turn_route") or {})
         intent_trace = dict(understanding.get("intent_trace") or {})
         query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
+        intent_duration_ms = _duration_ms(started_at)
+        skill_started_at = time.perf_counter()
         selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
         slots = dict(understanding.get("slots") or {})
         skill_package = selected_skill.package_metadata()
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots})
-        observations.append({"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package})
+        observations.append({"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots, "duration_ms": intent_duration_ms})
+        observations.append({"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package, "duration_ms": _duration_ms(skill_started_at)})
         next_state = dict(state)
         next_state.update(
             {
@@ -412,6 +424,7 @@ class TrustedQAWorkflow:
         return next_state
 
     async def _graph_run_clarify_gate(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         query_type = str(state.get("query_type") or "fact_lookup")
         collection_name = str(state.get("collection_name") or "default")
         slots = dict(state.get("slots") or {})
@@ -424,6 +437,7 @@ class TrustedQAWorkflow:
                 "slots": slots,
                 "missing_slots": clarify.get("missing_slots") or [],
                 "decision": clarify.get("decision") or "answer",
+                "duration_ms": _duration_ms(started_at),
             }
         )
         next_state = dict(state)
@@ -441,6 +455,7 @@ class TrustedQAWorkflow:
         return "clarify" if clarify.get("decision") == "clarify" else "retrieve"
 
     async def _graph_build_clarify_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         clarify = dict(state.get("clarify") or {})
@@ -455,8 +470,12 @@ class TrustedQAWorkflow:
             str(getattr(state.get("selected_skill"), "skill_name", "")),
         )
         response["answer"] = clarify.get("clarify_question") or response.get("answer", "")
+        observations = list(state.get("observations") or [])
+        observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(started_at), "llm_answer_used": False})
+        response["retrieval_trace"]["react_observations"] = observations
+        response["react_observations"] = observations
         next_state = dict(state)
-        next_state.update({"response": response, "decision": "clarify", "llm_expansion_used": False, "llm_answer_used": False})
+        next_state.update({"response": response, "decision": "clarify", "llm_expansion_used": False, "llm_answer_used": False, "observations": observations})
         return next_state
     async def _graph_retrieve_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("effective_question") or state.get("question") or "")
@@ -487,6 +506,7 @@ class TrustedQAWorkflow:
         return next_state
 
     async def _graph_evaluate_evidence(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         gate = await self.evidence_decision.evaluate(
             question=str(state.get("effective_question") or state.get("question") or ""),
             query_type=str(state.get("query_type") or "fact_lookup"),
@@ -498,7 +518,7 @@ class TrustedQAWorkflow:
             table_evidence_quota=self.table_evidence_quota,
         )
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate})
+        observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate, "duration_ms": _duration_ms(started_at)})
         next_state = dict(state)
         next_state.update({"gate": gate, "observations": observations})
         return next_state
@@ -511,6 +531,7 @@ class TrustedQAWorkflow:
         return "final"
 
     async def _graph_retry_retrieval(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         retry_count = int(state.get("retry_count") or 0) + 1
         gate = dict(state.get("gate") or {})
         retry_question = str(gate.get("suggested_retry_query") or "").strip() or str(state.get("effective_question") or state.get("question") or "")
@@ -542,7 +563,7 @@ class TrustedQAWorkflow:
             table_evidence_quota=self.table_evidence_quota,
         )
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
+        observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence), "duration_ms": _duration_ms(started_at)})
         next_state = dict(state)
         next_state.update(
             {
@@ -567,6 +588,7 @@ class TrustedQAWorkflow:
         return "final"
 
     async def _graph_build_answer_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         question = str(state.get("effective_question") or state.get("question") or "")
         query_type = str(state.get("query_type") or "fact_lookup")
         gate = dict(state.get("gate") or {})
@@ -590,6 +612,8 @@ class TrustedQAWorkflow:
             if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
+        observations = list(state.get("observations") or [])
+        observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(started_at), "llm_answer_used": llm_answer_used})
         response = self._build_response(
             str(state.get("sid") or ""),
             query_type,
@@ -598,15 +622,16 @@ class TrustedQAWorkflow:
             (state.get("retrieval_result") or {}).get("retrieval_trace") or {},
             (state.get("retrieval_result") or {}).get("rerank_trace") or {},
             str(getattr(state.get("selected_skill"), "skill_name", "")),
-            observations=state.get("observations") or [],
+            observations=observations,
             expanded_queries=state.get("expanded") or [],
             gate=gate,
         )
         next_state = dict(state)
-        next_state.update({"response": response, "decision": decision, "gate": gate, "llm_answer_used": llm_answer_used})
+        next_state.update({"response": response, "decision": decision, "gate": gate, "llm_answer_used": llm_answer_used, "observations": observations})
         return next_state
 
     async def _graph_persist_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        workflow_started_at = state.get("workflow_started_at")
         response = dict(state.get("response") or {})
         if not response:
             next_state = dict(state)
@@ -629,6 +654,7 @@ class TrustedQAWorkflow:
             effective_question=str(state.get("effective_question") or state.get("question") or ""),
             conversation_state=state.get("conversation_state") or {},
             turn_route=state.get("turn_route") or {},
+            workflow_duration_ms=_duration_ms(float(workflow_started_at)) if isinstance(workflow_started_at, (int, float)) else None,
         )
         self._save(str(state.get("sid") or ""), str(state.get("original_question") or state.get("question") or ""), response)
         self._update_conversation_focus(
@@ -640,6 +666,8 @@ class TrustedQAWorkflow:
             conversation_state=state.get("conversation_state") or {},
             turn_route=state.get("turn_route") or {},
         )
+        if isinstance(workflow_started_at, (int, float)):
+            self._set_workflow_duration(response, _duration_ms(float(workflow_started_at)))
         next_state = dict(state)
         next_state.update({"response": response})
         return next_state
@@ -699,41 +727,56 @@ class TrustedQAWorkflow:
         expand_query_num: int = 3,
         enable_cache: bool = True,
     ) -> Dict[str, Any]:
+        workflow_started_at = time.perf_counter()
+        load_session_started_at = time.perf_counter()
         session = self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
+        load_session_duration_ms = _duration_ms(load_session_started_at)
+        context_started_at = time.perf_counter()
         context = await self.conversation_context.prepare_context(session, question, collection_name)
+        context_duration_ms = _duration_ms(context_started_at)
         original_question = str(context.get("original_question") or question)
         effective_question = str(context.get("effective_question") or question)
         conversation_state = context.get("conversation_state") or {}
         turn_route = context.get("turn_route") or {}
+        intent_started_at = time.perf_counter()
         understanding = await self._understand_question(effective_question, conversation_context=turn_route)
+        intent_duration_ms = _duration_ms(intent_started_at)
         intent_trace = dict(understanding.get("intent_trace") or {})
         query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
+        skill_started_at = time.perf_counter()
         selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
         slots = dict(understanding.get("slots") or {})
         skill_package = selected_skill.package_metadata()
+        skill_duration_ms = _duration_ms(skill_started_at)
+        clarify_started_at = time.perf_counter()
         clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
+        clarify_duration_ms = _duration_ms(clarify_started_at)
         observations: List[Dict[str, Any]] = [
-            {"phase": "load_session", "session_id": sid},
+            {"phase": "load_session", "session_id": sid, "duration_ms": load_session_duration_ms},
             {
                 "phase": "conversation_context",
                 "turn_type": turn_route.get("turn_type", "new_rag_query"),
                 "context_source": turn_route.get("context_source", "none"),
                 "effective_question": effective_question,
                 "history_refs": turn_route.get("history_refs", []),
+                "duration_ms": context_duration_ms,
             },
-            {"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots},
-            {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package},
+            {"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots, "duration_ms": intent_duration_ms},
+            {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package, "duration_ms": skill_duration_ms},
             {
                 "phase": "clarify_gate",
                 "slots": slots,
                 "missing_slots": clarify.get("missing_slots") or [],
                 "decision": clarify.get("decision") or "answer",
+                "duration_ms": clarify_duration_ms,
             },
         ]
 
         if clarify["decision"] == "clarify":
+            answer_started_at = time.perf_counter()
             answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=[], decision="clarify", gate_reason="missing_slots")
+            observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(answer_started_at), "llm_answer_used": False})
             response = self._build_response(
                 sid,
                 query_type,
@@ -760,6 +803,7 @@ class TrustedQAWorkflow:
                 effective_question=effective_question,
                 conversation_state=conversation_state,
                 turn_route=turn_route,
+                workflow_duration_ms=_duration_ms(workflow_started_at),
             )
             self._save(sid, original_question, response)
             self._update_conversation_focus(
@@ -771,6 +815,7 @@ class TrustedQAWorkflow:
                 conversation_state=conversation_state,
                 turn_route=turn_route,
             )
+            self._set_workflow_duration(response, _duration_ms(workflow_started_at))
             return response
 
         retrieval_result, expanded, llm_expanded, llm_expansion_used, retrieval_stage = await self._retrieve_with_cache_aware_expansion(
@@ -783,6 +828,7 @@ class TrustedQAWorkflow:
         )
         evidence = list(retrieval_result.get("evidence") or [])
         observations.append({**retrieval_stage, "evidence_count": len(evidence)})
+        evidence_started_at = time.perf_counter()
         gate = await self.evidence_decision.evaluate(
             question=effective_question,
             query_type=query_type,
@@ -793,10 +839,11 @@ class TrustedQAWorkflow:
             retry_count=0,
             table_evidence_quota=self.table_evidence_quota,
         )
-        observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate})
+        observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate, "duration_ms": _duration_ms(evidence_started_at)})
 
         retry_count = 0
         while gate.get("decision") == "retry" and retry_count < self.evidence_decision.retry_limit:
+            retry_started_at = time.perf_counter()
             retry_count += 1
             retry_question = str(gate.get("suggested_retry_query") or "").strip() or effective_question
             retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
@@ -827,7 +874,7 @@ class TrustedQAWorkflow:
                 retry_count=retry_count,
                 table_evidence_quota=self.table_evidence_quota,
             )
-            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "llm_expanded": retry_llm_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence)})
+            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "llm_expanded": retry_llm_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence), "duration_ms": _duration_ms(retry_started_at)})
 
         decision = gate.get("decision", "refuse")
         if decision == "retry":
@@ -838,6 +885,7 @@ class TrustedQAWorkflow:
         if decision not in {"answer", "clarify", "refuse"}:
             decision = "refuse"
 
+        answer_started_at = time.perf_counter()
         answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=evidence, decision=decision, gate_reason=gate.get("reason", ""))
         llm_answer_used = False
         if decision == "answer":
@@ -850,6 +898,7 @@ class TrustedQAWorkflow:
             if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
+        observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(answer_started_at), "llm_answer_used": llm_answer_used})
         response = self._build_response(
             sid,
             query_type,
@@ -878,6 +927,7 @@ class TrustedQAWorkflow:
             effective_question=effective_question,
             conversation_state=conversation_state,
             turn_route=turn_route,
+            workflow_duration_ms=_duration_ms(workflow_started_at),
         )
         self._save(sid, original_question, response)
         self._update_conversation_focus(
@@ -889,7 +939,41 @@ class TrustedQAWorkflow:
             conversation_state=conversation_state,
             turn_route=turn_route,
         )
+        self._set_workflow_duration(response, _duration_ms(workflow_started_at))
         return response
+
+    @staticmethod
+    def _set_workflow_duration(response: Dict[str, Any], duration_ms: int) -> None:
+        total = max(0, int(duration_ms))
+        trace = response.setdefault("retrieval_trace", {})
+        trace["workflow_duration_ms"] = total
+        stages = trace.get("progress_stages")
+        if not isinstance(stages, list):
+            return
+        kept_stages = [
+            stage
+            for stage in stages
+            if not (isinstance(stage, dict) and stage.get("phase") == "finalize_response")
+        ]
+        timed_sum = 0
+        for stage in kept_stages:
+            if isinstance(stage, dict) and stage.get("timed", True):
+                timed_sum += max(0, int(stage.get("duration_ms") or 0))
+        residual = total - timed_sum
+        if residual > 0:
+            kept_stages.append(
+                {
+                    "phase": "finalize_response",
+                    "status": "completed",
+                    "duration_ms": residual,
+                    "timed": True,
+                    "cache_hit": False,
+                    "llm_query_expansion_used": False,
+                    "evidence_count": 0,
+                }
+            )
+        trace["progress_stages"] = kept_stages
+
     def _apply_response_traces(
         self,
         response: Dict[str, Any],
@@ -907,6 +991,7 @@ class TrustedQAWorkflow:
         effective_question: str | None = None,
         conversation_state: Dict[str, Any] | None = None,
         turn_route: Dict[str, Any] | None = None,
+        workflow_duration_ms: int | None = None,
     ) -> Dict[str, Any]:
         trace_metadata = getattr(self.llm_service, "trace_metadata", None)
         llm_trace = trace_metadata() if callable(trace_metadata) else {}
@@ -917,6 +1002,8 @@ class TrustedQAWorkflow:
         state_snapshot = dict(conversation_state or {})
         response.setdefault("retrieval_trace", {})
         response.setdefault("skill_trace", {})
+        if workflow_duration_ms is not None:
+            response["retrieval_trace"]["workflow_duration_ms"] = int(workflow_duration_ms)
         response["original_question"] = original
         response["effective_question"] = effective
         response["turn_type"] = route.get("turn_type", "new_rag_query")
@@ -996,6 +1083,7 @@ class TrustedQAWorkflow:
                     "phase": phase,
                     "status": "completed",
                     "duration_ms": int(item.get("duration_ms") or 0),
+                    "timed": "duration_ms" in item,
                     "cache_hit": bool(item.get("cache_hit", False)),
                     "llm_query_expansion_used": bool(item.get("llm_query_expansion_used", False)),
                     "evidence_count": int(item.get("evidence_count") or 0),

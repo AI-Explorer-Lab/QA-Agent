@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ def _compact_qa_response(response: dict[str, Any]) -> dict[str, Any]:
             "citation_count": len(citations),
             "repository_collection_count": retrieval_trace.get("repository_collection_count", 0),
             "workflow_runner": retrieval_trace.get("workflow_runner", ""),
+            "workflow_duration_ms": retrieval_trace.get("workflow_duration_ms", 0),
             "progress_stages": retrieval_trace.get("progress_stages", []),
         },
     }
@@ -104,19 +106,30 @@ async def ask_stream(request: QARequest):
     collection_name = _validate_qa_request(request)
 
     async def event_stream():
+        started_at = time.perf_counter()
+
+        def elapsed_ms() -> int:
+            return int((time.perf_counter() - started_at) * 1000)
+
         yield _sse_event(
             "status",
             {
                 "message": STREAM_WAITING_MESSAGE,
-                "stage": "started",
+                "stage": "load_session",
+                "status": "running",
                 "collection_name": collection_name,
+                "elapsed_ms": elapsed_ms(),
             },
         )
         task = asyncio.create_task(_run_qa(request, collection_name))
         stage_plan = [
-            ("understanding", "?????????????"),
-            ("retrieving", "?????????"),
-            ("answering", "????????"),
+            ("conversation_context", "正在整理会话上下文"),
+            ("intent_slot_understanding_agent", "正在识别意图与槽位"),
+            ("select_skill_from_registry", "正在选择问答技能"),
+            ("clarify_gate", "正在检查是否需要澄清"),
+            ("parallel_hybrid_retrieval", "正在检索候选证据"),
+            ("evidence_decision", "正在核验证据质量"),
+            ("answer_generation", "正在生成可核查答案"),
         ]
         stage_index = 0
         try:
@@ -131,11 +144,23 @@ async def ask_stream(request: QARequest):
                     {
                         "message": message,
                         "stage": stage,
+                        "status": "running",
                         "collection_name": collection_name,
+                        "elapsed_ms": elapsed_ms(),
                     },
                 )
             response = await task
             payload = response if request.include_debug else _compact_qa_response(response)
+            yield _sse_event(
+                "status",
+                {
+                    "message": "答案生成完成，正在输出",
+                    "stage": "answer_generation",
+                    "status": "completed",
+                    "collection_name": collection_name,
+                    "elapsed_ms": elapsed_ms(),
+                },
+            )
             yield _sse_event("final", payload)
         except asyncio.CancelledError:
             task.cancel()
