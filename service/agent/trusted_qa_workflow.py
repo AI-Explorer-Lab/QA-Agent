@@ -70,6 +70,14 @@ def _fixed_query_variants(question: str, query_type: str, candidates: List[str] 
     return merged
 
 
+def _usable_llm_answer(answer: Any) -> bool:
+    text = str(answer or "").strip()
+    if len(text) < 12:
+        return False
+    incomplete_endings = ("根据所提供的", "根据提供的", "根据现有证据", "根据证据")
+    return text not in incomplete_endings
+
+
 class TrustedQAWorkflow:
     def __init__(self) -> None:
         self.config = get_app_config()
@@ -579,15 +587,9 @@ class TrustedQAWorkflow:
                 evidence=answer_payload.get("evidence", []),
                 citations=answer_payload.get("citations", []),
             )
-            if llm_answer:
+            if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
-            else:
-                answer_payload["answer"] = self.answer_generator.llm_generation_failed_answer(
-                    answer_payload.get("evidence", []),
-                    error=str(getattr(self.llm_service, "last_error", "") or ""),
-                )
-                answer_payload["confidence"] = min(float(answer_payload.get("confidence") or 0.0), 0.2)
         response = self._build_response(
             str(state.get("sid") or ""),
             query_type,
@@ -845,15 +847,9 @@ class TrustedQAWorkflow:
                 evidence=answer_payload.get("evidence", []),
                 citations=answer_payload.get("citations", []),
             )
-            if llm_answer:
+            if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
                 llm_answer_used = True
-            else:
-                answer_payload["answer"] = self.answer_generator.llm_generation_failed_answer(
-                    answer_payload.get("evidence", []),
-                    error=str(getattr(self.llm_service, "last_error", "") or ""),
-                )
-                answer_payload["confidence"] = min(float(answer_payload.get("confidence") or 0.0), 0.2)
         response = self._build_response(
             sid,
             query_type,

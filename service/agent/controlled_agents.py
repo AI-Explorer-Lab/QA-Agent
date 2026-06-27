@@ -13,6 +13,7 @@ from service.agent.query_classifier import (
     _SUMMARY_KEYWORDS,
     _TABLE_KEYWORDS,
     classify_query_type,
+    is_financial_table_query,
 )
 from service.agent.schemas import QUERY_TYPE_SET, normalize_query_type
 from service.agent.skills import SkillDefinition
@@ -286,6 +287,8 @@ def _keyword_query_type(question: str) -> str | None:
         return "report_generation"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["citation_locate"]):
         return "citation_locate"
+    if is_financial_table_query(normalized):
+        return "table_qa"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["fact_lookup"]):
         return "fact_lookup"
     if _contains_keyword(normalized, INTENT_KEYWORD_GROUPS["table_qa"]):
@@ -341,6 +344,23 @@ class QuestionUnderstandingAgent:
                 )
                 intent_trace["understanding_source"] = "rule"
                 return {"intent_trace": intent_trace, "query_type": rule_query_type, "selected_skill": selected_skill, "slots": slots}
+
+        classifier_query_type = classify_query_type(question)
+        if classifier_query_type != "ambiguous_query":
+            selected_skill = skill_registry.select_skill(classifier_query_type)
+            rule_slots = self.slot_agent._rule_slots(question, classifier_query_type, selected_skill)
+            if _rule_slots_sufficient(rule_slots, selected_skill):
+                slots = _merge_slots(rule_slots, None)
+                slots["__slot_fill_source__"] = "rule_classifier"
+                slots["__skill_name__"] = selected_skill.skill_name
+                slots["__missing_required__"] = selected_skill.get_missing_slots(slots)
+                intent_trace = IntentUnderstandingAgent._build_result(
+                    classifier_query_type,
+                    source="rule_classifier",
+                    reason="Matched deterministic classifier and required slots; skipped LLM understanding.",
+                )
+                intent_trace["understanding_source"] = "rule_classifier"
+                return {"intent_trace": intent_trace, "query_type": classifier_query_type, "selected_skill": selected_skill, "slots": slots}
 
         llm_result = await self._understand_with_llm(question, skill_registry, conversation_context=conversation_context)
         if llm_result is not None:
@@ -481,6 +501,8 @@ class IntentUnderstandingAgent:
         if query_type != "fact_lookup":
             return query_type
         table_slots = extract_slots(question, "table_qa")
+        if is_financial_table_query(question) and table_slots.get("metric"):
+            return "table_qa"
         if table_slots.get("metric") and table_slots.get("period"):
             return "table_qa"
         normalized = _clean_str(question).lower()
@@ -532,6 +554,8 @@ class SlotFillingAgent:
             slots["years"] = years
             if not slots["period"] or slots["period"] not in years:
                 slots["period"] = years[0]
+        elif query_type == "table_qa" and slots.get("metric") and is_financial_table_query(question):
+            slots["period"] = "报告期"
         lowered = _clean_str(question).lower()
         if not slots["metric"]:
             for hint in sorted(EXTRA_TABLE_HINTS, key=len, reverse=True):

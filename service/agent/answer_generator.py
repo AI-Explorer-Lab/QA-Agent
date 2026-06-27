@@ -48,6 +48,64 @@ def _entity_terms(question: str) -> List[str]:
     return terms
 
 
+_TABLE_QUERY_TERMS = (
+    "营业收入",
+    "营业成本",
+    "归属于上市公司股东的净利润",
+    "经营活动产生的现金流量净额",
+    "基本每股收益",
+    "稀释每股收益",
+    "研发投入",
+    "研发投入合计",
+    "货币资金",
+    "应收账款",
+    "存货",
+    "功率器件",
+    "功率IC",
+    "经销",
+    "直销",
+    "非经常性损益",
+    "委托他人投资或管理资产的损益",
+    "合计",
+)
+
+
+def _table_query_terms(question: str) -> List[str]:
+    normalized = str(question or "")
+    terms = [term for term in _TABLE_QUERY_TERMS if term.lower() in normalized.lower()]
+    return terms or _entity_terms(question)
+
+
+def _clean_table_content(content: Any) -> str:
+    text = _answer_text(content)
+    return text.replace("<TABLE_START>", "").replace("<TABLE_END>", "").strip()
+
+
+def _focused_table_excerpt(content: Any, question: str, max_lines: int = 12) -> str:
+    text = _clean_table_content(content)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    terms = _table_query_terms(question)
+    kept: List[str] = []
+    for line in lines:
+        if "---" in line and "|" in line:
+            kept.append(line)
+            continue
+        if len(kept) < 2 and "|" in line:
+            kept.append(line)
+            continue
+        if any(term and term in line for term in terms):
+            kept.append(line)
+        if len(kept) >= max_lines:
+            break
+
+    if not kept:
+        kept = lines[:max_lines]
+    return "\n".join(kept[:max_lines])
+
+
 def _entity_order(row: Dict[str, Any], question: str) -> int:
     haystack = _normalize_for_match(
         " ".join(
@@ -169,7 +227,7 @@ class AnswerGenerator:
             return {"answer": answer, "citations": citations, "evidence": evidence_payload, "confidence": 0.0}
 
         if query_type == "table_qa":
-            answer = self._table_answer(evidence_payload)
+            answer = self._table_answer(evidence_payload, question=question)
         elif query_type == "citation_locate":
             answer = self._citation_locate_answer(evidence_payload)
         elif query_type == "multi_doc_compare":
@@ -213,13 +271,16 @@ class AnswerGenerator:
             lines.append(f"- {_answer_text(item.get('content', ''))} [{self._citation_label(item)}]")
         return "\u57fa\u4e8e PDF \u8bc1\u636e\uff1a\n" + "\n".join(lines)
 
-    def _table_answer(self, evidence: List[Dict[str, Any]]) -> str:
+    def _table_answer(self, evidence: List[Dict[str, Any]], question: str = "") -> str:
         lines = ["\u57fa\u4e8e\u8868\u683c\u8bc1\u636e\uff1a"]
         for item in evidence:
             if item.get("chunk_type") != "table":
                 continue
             source = self._citation_label(item)
-            lines.append(f"- \u6307\u6807/\u6570\u503c/\u5355\u4f4d/\u671f\u95f4\uff1a{_answer_text(item.get('content', ''))} [{source}]")
+            excerpt = _focused_table_excerpt(item.get("content", ""), question)
+            if not excerpt:
+                continue
+            lines.append(f"- \u76f8\u5173\u8868\u683c\u884c\uff1a\n{excerpt} [{source}]")
         if len(lines) == 1:
             return self._fact_answer(evidence)
         return "\n".join(lines)

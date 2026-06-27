@@ -68,7 +68,7 @@ def extract_slots(question: str, query_type: str) -> Dict[str, Any]:
     slots: Dict[str, Any] = {
         "years": years,
         "metric": "、".join(metrics) if metrics else "",
-        "period": years[0] if years else "",
+        "period": years[0] if years else ("报告期" if query_type == "table_qa" and metrics else ""),
         "target_statement": quoted[0] if quoted else "",
         "compare_targets": compare_targets,
         "scope": scope,
