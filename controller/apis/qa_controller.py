@@ -113,16 +113,24 @@ async def ask_stream(request: QARequest):
             },
         )
         task = asyncio.create_task(_run_qa(request, collection_name))
+        stage_plan = [
+            ("understanding", "?????????????"),
+            ("retrieving", "?????????"),
+            ("answering", "????????"),
+        ]
+        stage_index = 0
         try:
             while True:
-                done, _ = await asyncio.wait({task}, timeout=5)
+                done, _ = await asyncio.wait({task}, timeout=2)
                 if done:
                     break
+                stage, message = stage_plan[min(stage_index, len(stage_plan) - 1)]
+                stage_index += 1
                 yield _sse_event(
                     "status",
                     {
-                        "message": STREAM_WAITING_MESSAGE,
-                        "stage": "running",
+                        "message": message,
+                        "stage": stage,
                         "collection_name": collection_name,
                     },
                 )

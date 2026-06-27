@@ -9,7 +9,7 @@ from uuid import uuid4
 from service.agent.answer_generator import AnswerGenerator
 from service.agent.clarify_gate import build_clarify_question
 from service.agent.conversation_context import ConversationContextService
-from service.agent.controlled_agents import IntentUnderstandingAgent, SlotFillingAgent
+from service.agent.controlled_agents import IntentUnderstandingAgent, QuestionUnderstandingAgent, SlotFillingAgent
 from service.agent.evidence_gate import EvidenceDecisionEngine
 from service.agent.query_expander import FIXED_QUERY_VARIANT_TOTAL, expand_queries
 from service.agent.skill_registry import DEFAULT_SKILL_REGISTRY
@@ -83,6 +83,7 @@ class TrustedQAWorkflow:
         self.conversation_context = ConversationContextService(self.llm_service)
         self.intent_agent = IntentUnderstandingAgent(self.llm_service)
         self.slot_agent = SlotFillingAgent(self.llm_service)
+        self.understanding_agent = QuestionUnderstandingAgent(self.llm_service)
         self.embedding_service = EmbeddingService(provider=build_embedding_provider_from_config(self.config))
         self.retriever = HybridRetriever(
             ParallelQueryExecutor(
@@ -255,23 +256,12 @@ class TrustedQAWorkflow:
         }
         return retrieval_result, expanded, llm_expanded, llm_expansion_used, stage
 
-    async def _classify_intent(self, question: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        try:
-            return await self.intent_agent.classify(question, conversation_context=conversation_context or {})
-        except TypeError:
-            return await self.intent_agent.classify(question)
-
-    async def _fill_slots(
-        self,
-        question: str,
-        query_type: str,
-        selected_skill: Any,
-        conversation_context: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
-        try:
-            return await self.slot_agent.fill(question, query_type, selected_skill, conversation_context=conversation_context or {})
-        except TypeError:
-            return await self.slot_agent.fill(question, query_type, selected_skill)
+    async def _understand_question(self, question: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return await self.understanding_agent.understand(
+            question,
+            skill_registry=self.skill_registry,
+            conversation_context=conversation_context or {},
+        )
 
     @staticmethod
     def _build_clarify_payload(
@@ -319,8 +309,7 @@ class TrustedQAWorkflow:
         graph = StateGraph(dict)
         graph.add_node("load_session", self._graph_load_session)
         graph.add_node("build_conversation_context", self._graph_build_conversation_context)
-        graph.add_node("understand_question", self._graph_understand_question)
-        graph.add_node("fill_slots", self._graph_fill_slots)
+        graph.add_node("understand_intent_and_slots", self._graph_understand_intent_and_slots)
         graph.add_node("run_clarify_gate", self._graph_run_clarify_gate)
         graph.add_node("build_clarify_response", self._graph_build_clarify_response)
         graph.add_node("retrieve_evidence", self._graph_retrieve_evidence)
@@ -331,9 +320,8 @@ class TrustedQAWorkflow:
 
         graph.set_entry_point("load_session")
         graph.add_edge("load_session", "build_conversation_context")
-        graph.add_edge("build_conversation_context", "understand_question")
-        graph.add_edge("understand_question", "fill_slots")
-        graph.add_edge("fill_slots", "run_clarify_gate")
+        graph.add_edge("build_conversation_context", "understand_intent_and_slots")
+        graph.add_edge("understand_intent_and_slots", "run_clarify_gate")
         graph.add_conditional_edges(
             "run_clarify_gate",
             self._graph_route_after_clarify_gate,
@@ -391,14 +379,16 @@ class TrustedQAWorkflow:
             "observations": observations,
         }
 
-    async def _graph_understand_question(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _graph_understand_intent_and_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("effective_question") or state.get("question") or "")
-        intent_trace = await self._classify_intent(question, conversation_context=state.get("turn_route") or {})
-        query_type = str(intent_trace.get("query_type") or "fact_lookup")
-        selected_skill = self.skill_registry.select_skill(query_type)
+        understanding = await self._understand_question(question, conversation_context=state.get("turn_route") or {})
+        intent_trace = dict(understanding.get("intent_trace") or {})
+        query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
+        selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
+        slots = dict(understanding.get("slots") or {})
         skill_package = selected_skill.package_metadata()
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "intent_understanding_agent", "intent": intent_trace})
+        observations.append({"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots})
         observations.append({"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package})
         next_state = dict(state)
         next_state.update(
@@ -407,20 +397,10 @@ class TrustedQAWorkflow:
                 "query_type": query_type,
                 "selected_skill": selected_skill,
                 "skill_package": skill_package,
+                "slots": slots,
                 "observations": observations,
             }
         )
-        return next_state
-
-    async def _graph_fill_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        question = str(state.get("effective_question") or state.get("question") or "")
-        query_type = str(state.get("query_type") or "fact_lookup")
-        selected_skill = state.get("selected_skill")
-        slots = await self._fill_slots(question, query_type, selected_skill, conversation_context=state.get("turn_route") or {})
-        observations = list(state.get("observations") or [])
-        observations.append({"phase": "slot_filling_agent", "slots": slots})
-        next_state = dict(state)
-        next_state.update({"slots": slots, "observations": observations})
         return next_state
 
     async def _graph_run_clarify_gate(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -724,10 +704,11 @@ class TrustedQAWorkflow:
         effective_question = str(context.get("effective_question") or question)
         conversation_state = context.get("conversation_state") or {}
         turn_route = context.get("turn_route") or {}
-        intent_trace = await self._classify_intent(effective_question, conversation_context=turn_route)
-        query_type = str(intent_trace.get("query_type") or "fact_lookup")
-        selected_skill = self.skill_registry.select_skill(query_type)
-        slots = await self._fill_slots(effective_question, query_type, selected_skill, conversation_context=turn_route)
+        understanding = await self._understand_question(effective_question, conversation_context=turn_route)
+        intent_trace = dict(understanding.get("intent_trace") or {})
+        query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
+        selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
+        slots = dict(understanding.get("slots") or {})
         skill_package = selected_skill.package_metadata()
         clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
         observations: List[Dict[str, Any]] = [
@@ -739,9 +720,8 @@ class TrustedQAWorkflow:
                 "effective_question": effective_question,
                 "history_refs": turn_route.get("history_refs", []),
             },
-            {"phase": "intent_understanding_agent", "intent": intent_trace},
+            {"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots},
             {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package},
-            {"phase": "slot_filling_agent", "slots": slots},
             {
                 "phase": "clarify_gate",
                 "slots": slots,

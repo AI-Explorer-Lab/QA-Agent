@@ -84,6 +84,22 @@ class SlotFillSchema(BaseModel):
     focus: str = ""
 
 
+class QuestionUnderstandingSchema(BaseModel):
+    query_type: str = "fact_lookup"
+    matched_keyword_group: str = ""
+    intent: str = ""
+    reason: str = ""
+    years: List[str] = Field(default_factory=list)
+    metric: str = ""
+    period: str = ""
+    target_statement: str = ""
+    compare_targets: List[str] = Field(default_factory=list)
+    scope: str = ""
+    table_name: str = ""
+    unit: str = ""
+    focus: str = ""
+
+
 class EvidenceAuditSchema(BaseModel):
     semantic_decision: str = "retry"
     missing_aspects: List[str] = Field(default_factory=list)
@@ -297,6 +313,113 @@ def _rule_slots_sufficient(slots: Mapping[str, Any], skill: SkillDefinition | No
     return not skill.get_missing_slots(dict(slots))
 
 
+class QuestionUnderstandingAgent:
+    def __init__(self, llm_service: Any | None = None) -> None:
+        self.llm_service = llm_service
+        self.intent_agent = IntentUnderstandingAgent(llm_service)
+        self.slot_agent = SlotFillingAgent(llm_service)
+
+    async def understand(
+        self,
+        question: str,
+        skill_registry: Any,
+        conversation_context: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        rule_query_type = _keyword_query_type(question)
+        if rule_query_type is not None:
+            selected_skill = skill_registry.select_skill(rule_query_type)
+            rule_slots = self.slot_agent._rule_slots(question, rule_query_type, selected_skill)
+            if _rule_slots_sufficient(rule_slots, selected_skill):
+                slots = _merge_slots(rule_slots, None)
+                slots["__slot_fill_source__"] = "rule"
+                slots["__skill_name__"] = selected_skill.skill_name
+                slots["__missing_required__"] = selected_skill.get_missing_slots(slots)
+                intent_trace = IntentUnderstandingAgent._build_result(
+                    rule_query_type,
+                    source="rule_keyword",
+                    reason="Matched a fixed intent keyword and required slots; skipped LLM understanding.",
+                )
+                intent_trace["understanding_source"] = "rule"
+                return {"intent_trace": intent_trace, "query_type": rule_query_type, "selected_skill": selected_skill, "slots": slots}
+
+        llm_result = await self._understand_with_llm(question, skill_registry, conversation_context=conversation_context)
+        if llm_result is not None:
+            return llm_result
+
+        query_type = rule_query_type or self.intent_agent._fallback_query_type(question)
+        selected_skill = skill_registry.select_skill(query_type)
+        slots = _merge_slots(self.slot_agent._rule_slots(question, query_type, selected_skill), None)
+        slots["__slot_fill_source__"] = "rule_fallback"
+        slots["__skill_name__"] = selected_skill.skill_name
+        slots["__missing_required__"] = selected_skill.get_missing_slots(slots)
+        intent_trace = IntentUnderstandingAgent._build_result(
+            query_type,
+            source="rule_fallback",
+            reason="Combined LLM understanding was unavailable; used rule fallback without separate slot LLM.",
+        )
+        intent_trace["understanding_source"] = "rule_fallback"
+        return {"intent_trace": intent_trace, "query_type": query_type, "selected_skill": selected_skill, "slots": slots}
+
+    async def _understand_with_llm(
+        self,
+        question: str,
+        skill_registry: Any,
+        conversation_context: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        catalog = []
+        for item in skill_registry.skill_catalog():
+            catalog.append(
+                {
+                    "skill_name": item.get("skill_name"),
+                    "query_types": item.get("query_types"),
+                    "required_slots": (item.get("slot_schema") or {}).get("required") if isinstance(item.get("slot_schema"), Mapping) else [],
+                    "task_description": item.get("task_description"),
+                }
+            )
+        parsed = await _safe_structured_json(
+            self.llm_service,
+            "Classify the user intent and extract slots in one pass. Return only JSON.",
+            {
+                "question": question,
+                "conversation_context": dict(conversation_context or {}),
+                "allowed_query_types": sorted(QUERY_TYPE_SET),
+                "skill_catalog": catalog,
+                "fixed_schema": {
+                    "query_type": "one allowed query type",
+                    "matched_keyword_group": "keyword group name or empty",
+                    "intent": "short snake_case intent",
+                    "reason": "brief reason",
+                    **{key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
+                },
+                "instructions": "Use the selected skill required slots. Do not invent unsupported slots; use empty strings or empty lists when absent.",
+            },
+            schema=QuestionUnderstandingSchema,
+            max_tokens=650,
+        )
+        if not parsed:
+            return None
+        query_type = normalize_query_type(parsed.get("query_type"))
+        if query_type not in QUERY_TYPE_SET:
+            return None
+        selected_skill = skill_registry.select_skill(query_type)
+        intent_trace = IntentUnderstandingAgent._build_result(
+            query_type,
+            source="llm_combined",
+            reason=_clean_str(parsed.get("reason")) or "LLM classified intent and slots in one call.",
+        )
+        if _clean_str(parsed.get("intent")):
+            intent_trace["intent"] = _clean_str(parsed.get("intent"))
+        if _clean_str(parsed.get("matched_keyword_group")):
+            intent_trace["matched_keyword_group"] = _clean_str(parsed.get("matched_keyword_group"))
+        intent_trace["understanding_source"] = "llm_combined"
+
+        slots = _merge_slots(self.slot_agent._rule_slots(question, query_type, selected_skill), {key: parsed.get(key) for key in SLOT_KEYS})
+        slots["__slot_fill_source__"] = "llm_combined"
+        slots["__skill_name__"] = selected_skill.skill_name
+        slots["__missing_required__"] = selected_skill.get_missing_slots(slots)
+        return {"intent_trace": intent_trace, "query_type": query_type, "selected_skill": selected_skill, "slots": slots}
+
+
 class IntentUnderstandingAgent:
     def __init__(self, llm_service: Any | None = None) -> None:
         self.llm_service = llm_service
@@ -357,6 +480,9 @@ class IntentUnderstandingAgent:
         query_type = classify_query_type(question)
         if query_type != "fact_lookup":
             return query_type
+        table_slots = extract_slots(question, "table_qa")
+        if table_slots.get("metric") and table_slots.get("period"):
+            return "table_qa"
         normalized = _clean_str(question).lower()
         if any(hint in normalized for hint in EXTRA_TABLE_HINTS):
             return "table_qa"

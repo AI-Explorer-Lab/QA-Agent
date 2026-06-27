@@ -21,6 +21,17 @@ def _safe_int(value: Any, default: int = 10**9) -> int:
         return default
 
 
+def _score_value(row: Dict[str, Any]) -> float:
+    for key in ("confidence_score", "final_score", "score"):
+        if key not in row:
+            continue
+        try:
+            return max(0.0, min(1.0, float(row.get(key))))
+        except Exception:
+            continue
+    return 0.0
+
+
 def _normalize_for_match(text: Any) -> str:
     return re.sub(r"\s+", "", str(text or "").lower())
 
@@ -80,7 +91,7 @@ def order_evidence_rows_for_answer(rows: List[Dict[str, Any]], question: str = "
             _section_order(row),
             _safe_int(row.get("page_idx")),
             _safe_int(row.get("chunk_index")),
-            -float(row.get("final_score") or row.get("score") or 0.0),
+            -float(row.get("rank_score") or row.get("final_score") or row.get("score") or 0.0),
         ),
     )
 
@@ -96,7 +107,7 @@ def build_evidence_payload(rows: List[Dict[str, Any]], question: str = "") -> Li
             "doc_source": str(row.get("doc_source") or ""),
             "chunk_type": str(row.get("chunk_type") or "text"),
             "content": content,
-            "score": float(row.get("final_score") or row.get("score") or 0.0),
+            "score": _score_value(row),
             "rank": index,
             "metadata": {
                 "page_idx": row.get("page_idx"),
@@ -107,6 +118,10 @@ def build_evidence_payload(rows: List[Dict[str, Any]], question: str = "") -> Li
                 "source_channels": row.get("source_channels", []),
                 "dense_score": row.get("dense_score", 0.0),
                 "bm25_score": row.get("bm25_score", 0.0),
+                "light_final_score": row.get("light_final_score", row.get("final_score", 0.0)),
+                "rank_score": row.get("rank_score", row.get("final_score", 0.0)),
+                "cross_encoder_score": row.get("cross_encoder_score"),
+                "confidence_score": row.get("confidence_score", row.get("final_score", 0.0)),
             },
         }
         evidence.append(item)

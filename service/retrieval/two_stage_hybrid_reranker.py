@@ -36,6 +36,18 @@ def _normalize_scores(values: Sequence[float]) -> List[float]:
     return [_clip01((value - minimum) / (maximum - minimum)) if value > 0 else 0.0 for value in values]
 
 
+def _normalize_relative_scores(values: Sequence[float]) -> List[float]:
+    if not values:
+        return []
+
+    maximum = max(values)
+    minimum = min(values)
+    if maximum == minimum:
+        return [1.0 for _ in values]
+
+    return [_clip01((value - minimum) / (maximum - minimum)) for value in values]
+
+
 def _token_overlap_score(query_tokens: set[str], text: str) -> float:
     if not query_tokens:
         return 0.0
@@ -217,9 +229,12 @@ class TwoStageHybridReranker:
                 + self.metadata_boost_weight * payload["metadata_boost"]
                 + self.table_boost_weight * payload["table_boost"]
             )
+            payload["light_final_score"] = payload["final_score"]
+            payload["confidence_score"] = payload["final_score"]
+            payload["rank_score"] = payload["final_score"]
             scored.append(payload)
 
-        scored.sort(key=lambda item: _safe_float(item.get("final_score")), reverse=True)
+        scored.sort(key=lambda item: _safe_float(item.get("rank_score") or item.get("final_score")), reverse=True)
 
         deduped: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -280,6 +295,9 @@ class TwoStageHybridReranker:
                 {
                     "chunk_id": row.get("chunk_id"),
                     "final_score": row.get("final_score"),
+                    "rank_score": row.get("rank_score"),
+                    "confidence_score": row.get("confidence_score"),
+                    "light_final_score": row.get("light_final_score"),
                     "dense_score": row.get("dense_score"),
                     "bm25_score": row.get("bm25_score"),
                     "metadata_boost": row.get("metadata_boost"),
@@ -346,15 +364,19 @@ class TwoStageHybridReranker:
             trace.setdefault("model", self.cross_encoder_model)
             return list(light_pool[:limit]), trace
 
+        normalized_scores = _normalize_relative_scores([float(score) for score in scores])
+
         scored_rows: List[Dict[str, Any]] = []
-        for row, score in zip(light_pool, scores):
+        for row, score, normalized_score in zip(light_pool, scores, normalized_scores):
             payload = dict(row)
             payload["light_final_score"] = _safe_float(payload.get("final_score"))
             payload["cross_encoder_score"] = float(score)
-            payload["final_score"] = float(score)
+            payload["rank_score"] = float(score)
+            payload["confidence_score"] = float(normalized_score)
+            payload["final_score"] = float(normalized_score)
             scored_rows.append(payload)
 
-        scored_rows.sort(key=lambda item: _safe_float(item.get("cross_encoder_score")), reverse=True)
+        scored_rows.sort(key=lambda item: _safe_float(item.get("rank_score")), reverse=True)
         selected = self._finalize_selection(scored_rows[:limit], scored_rows, limit, query_type, quota)
         trace = dict(score_trace or {})
         trace.setdefault("status", "applied")
@@ -446,7 +468,7 @@ class TwoStageHybridReranker:
                 merged.append(item)
                 seen.add(cid)
 
-        merged.sort(key=lambda row: _safe_float(row.get("final_score")), reverse=True)
+        merged.sort(key=lambda row: _safe_float(row.get("rank_score") or row.get("final_score")), reverse=True)
         if str(query_type or "") != "table_qa" or quota <= 0:
             return merged[:limit]
 
@@ -519,7 +541,7 @@ class TwoStageHybridReranker:
                 if abs(candidate_chunk - current_chunk) > 1:
                     continue
 
-                score = _safe_float(candidate.get("final_score"))
+                score = _safe_float(candidate.get("rank_score") or candidate.get("final_score"))
                 if score > neighbor_score:
                     neighbor = dict(candidate)
                     neighbor_score = score
@@ -528,6 +550,8 @@ class TwoStageHybridReranker:
                 continue
 
             neighbor["final_score"] = _clip01(_safe_float(neighbor.get("final_score")) + 0.02)
+            neighbor["confidence_score"] = _clip01(_safe_float(neighbor.get("confidence_score") or neighbor.get("final_score")) + 0.02)
+            neighbor["rank_score"] = _safe_float(neighbor.get("rank_score") or neighbor.get("final_score")) + 0.02
             chosen[_candidate_id(neighbor)] = neighbor
             supplemented += 1
 

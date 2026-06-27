@@ -2,20 +2,18 @@
 
 from typing import Any, Dict, List, Mapping, Sequence
 
-from service.agent.controlled_agents import EvidenceAuditAgent
+from service.agent.controlled_agents import EvidenceAuditAgent, merge_audit_and_rule_gate
 
 
 def _score(row: Dict[str, Any]) -> float:
-    try:
-        return float(
-            row.get("final_score")
-            or row.get("score")
-            or row.get("dense_score")
-            or row.get("bm25_score")
-            or 0.0
-        )
-    except Exception:
-        return 0.0
+    for key in ("light_final_score", "confidence_score", "final_score", "score", "dense_score", "bm25_score"):
+        if key not in row:
+            continue
+        try:
+            return max(0.0, min(1.0, float(row.get(key))))
+        except Exception:
+            continue
+    return 0.0
 
 
 def _confidence(rows: List[Dict[str, Any]]) -> float:
@@ -173,15 +171,20 @@ class EvidenceDecisionEngine:
             table_evidence_quota=table_evidence_quota,
             slots=dict(slots or {}),
         )
-        return await self.evidence_agent.decide_from_gate(
+        rule_audit = self.evidence_agent._rule_audit(
             question=question,
             query_type=query_type,
             slots=slots,
             selected_skill=selected_skill,
             evidence=rows,
-            rule_gate=rule_gate,
             rerank_trace=rerank_trace,
         )
+        merged = merge_audit_and_rule_gate(rule_gate, rule_audit)
+        merged["rule_gate"] = rule_gate
+        merged["evidence_audit"] = rule_audit
+        if merged.get("decision") == "retry" and not str(merged.get("suggested_retry_query") or "").strip():
+            merged["suggested_retry_query"] = str(rule_audit.get("suggested_retry_query") or question)
+        return merged
 
 
 def run_evidence_gate(
