@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 import inspect
+import os
 
 
 def _patch_httpx_testclient_compat() -> None:
@@ -71,8 +72,21 @@ async def preload_runtime_models() -> None:
         )
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _dev_reload_enabled() -> bool:
+    app_cfg = config.get("app", {}) if isinstance(config.get("app"), dict) else {}
+    default_enabled = str(app_cfg.get("env", "dev")).strip().lower() in {"dev", "local", "development"}
+    return _env_bool("TRUSTED_QA_RELOAD", default_enabled)
+
+
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=_dev_reload_enabled())
