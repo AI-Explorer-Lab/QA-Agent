@@ -276,7 +276,7 @@ class ConversationContextService:
         parsed = await _safe_structured_json(
             self.llm_service,
             (
-                "You route enterprise RAG conversation turns. Return only JSON. "
+                "You route RAG conversation turns. Return only JSON. "
                 "Do not answer the user question. Decide whether history is needed, "
                 "rewrite the current turn into a complete effective_question when needed, "
                 "and list exactly which history refs are used."

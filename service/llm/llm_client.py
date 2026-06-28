@@ -569,7 +569,7 @@ class LLMService:
         del expand_query_num
         total = 4
         system_prompt = (
-            "You rewrite enterprise PDF QA questions for hybrid retrieval. "
+            "You rewrite PDF QA questions for hybrid retrieval. "
             "Return valid JSON only: an array of exactly four retrieval query strings. "
             "Do not answer the question and do not extract values."
         )
@@ -619,7 +619,7 @@ class LLMService:
                 f"heading={item.get('metadata', {}).get('heading_path')} content={item.get('content')}"
             )
         system_prompt = (
-            "You are a trusted enterprise PDF QA agent. Answer only from the provided evidence. "
+            "You are a trusted PDF QA agent. Answer only from the provided evidence. "
             "Every key claim must cite citation ids like [C1]. If evidence is insufficient, say so. "
             "For table QA, include metric, value, unit, period and source when present. "
             "For financial table questions, inspect every provided table evidence item before deciding that a value is absent. "

@@ -23,7 +23,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.yaml"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
-        "name": "Enterprise-Unstructured-Document-Trusted-Question-Answering-Agent",
+        "name": "Trusted-Question-Answering-Agent",
         "env": "dev",
         "timezone": "Asia/Singapore",
     },

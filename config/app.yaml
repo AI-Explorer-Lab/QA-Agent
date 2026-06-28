@@ -1,19 +1,21 @@
 app:
-  name: Enterprise-Unstructured-Document-Trusted-Question-Answering-Agent
+  name: Trusted-Question-Answering-Agent
   env: dev
   timezone: Asia/Singapore
 llm:
-  provider: anyrouter
-  current_model: anyrouter-gpt-5.5
-  model: gpt-5.5
-  api_key: ''
-  base_url: https://anyrouter.top/v1
-  api_key_env: ANYROUTER_API_KEY
-  base_url_env: ANYROUTER_BASE_URL
+  provider: deepseek
+  current_model: deepseek-deepseek-v4-flash
+  model: deepseek-v4-flash
+  api_key: ""
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  base_url_env: DEEPSEEK_BASE_URL
   temperature: 0.2
   max_tokens: 2048
   enable_real_generation: true
-  timeout_seconds: 30
+  timeout_seconds: 35
+  max_retries: 0
+  client_mode: direct
   providers:
     anyrouter:
       base_url: https://anyrouter.top/v1
@@ -31,11 +33,24 @@ llm:
           model: gpt-5-codex
           use_responses_api: true
       api_key: ""
+    rightcode:
+      base_url: https://www.right.codes/codex/v1
+      anthropic_base_url: https://www.right.codes/codex/v1
+      api_key_env: RIGHTCODE_API_KEY
+      use_responses_api: false
+      client_mode: direct
+      timeout_seconds: 35
+      max_retries: 0
+      models:
+        gpt-5.4-mini:
+          model: gpt-5.4-mini
     deepseek:
       base_url: https://api.deepseek.com/v1
       api_key_env: DEEPSEEK_API_KEY
       use_responses_api: false
       models:
+        deepseek-v4-flash:
+          model: deepseek-v4-flash
         deepseek-chat:
           model: deepseek-chat
         deepseek-reasoner:
@@ -55,7 +70,7 @@ llm:
       models:
         glm-4.7:
           model: glm-4.7
-  anthropic_base_url: https://anyrouter.top/v1
+  anthropic_base_url: https://api.deepseek.com/v1
 embedding:
   provider: qwen
   model: text-embedding-v4
@@ -121,10 +136,12 @@ reranker:
   near_duplicate_threshold: 0.9
   cross_encoder_enabled: true
   cross_encoder_model: BAAI/bge-reranker-base
-  cross_encoder_candidate_pool: 30
+  cross_encoder_candidate_pool: 20
   cross_encoder_batch_size: 8
   cross_encoder_max_length: 512
   cross_encoder_local_files_only: false
+  cross_encoder_preload_on_startup: true
+  cross_encoder_load_on_request: false
 cache:
   enabled: true
   ttl_seconds: 3600
@@ -136,7 +153,7 @@ guardrails:
   evidence_min_docs: 2
   evidence_min_top_score: 0.45
   evidence_min_avg_score: 0.3
-  retry_limit: 2
+  retry_limit: 1
   refuse_on_low_evidence: true
 api_keys:
   openai_api_key: ''
