@@ -27,6 +27,7 @@ EVENT_TO_STEP = {
 
 STATUS_PROGRESS = {
     "pending": 0,
+    "queued": 5,
     "started": 8,
     "running": 50,
     "completed": 100,
@@ -79,6 +80,20 @@ class IndexProgressTracker:
         with self._lock:
             task = self._tasks.get(task_id)
             return deepcopy(task) if task else None
+
+    def mark_queued(self, task_id: str, detail: str = "Waiting for indexing worker") -> dict[str, Any] | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            task["status"] = "queued"
+            task["updated_at"] = _now()
+            for step in task["steps"]:
+                if step["status"] == "pending":
+                    step["detail"] = detail
+                    step["updated_at"] = task["updated_at"]
+                    break
+            return deepcopy(task)
 
     def update_step(
         self,

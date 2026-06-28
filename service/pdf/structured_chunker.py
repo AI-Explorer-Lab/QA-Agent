@@ -230,18 +230,59 @@ class StructuredChunker:
 
         def flush_text_buffer() -> str:
             nonlocal chunk_index, text_buffer, text_pages, last_text_chunk_content
-            merged = normalize_whitespace("\n\n".join(text_buffer), preserve_newlines=True)
+            text_segments = [
+                (normalize_whitespace(text, preserve_newlines=False), page_idx)
+                for text, page_idx in zip(text_buffer, text_pages)
+            ]
+            text_segments = [(text, page_idx) for text, page_idx in text_segments if text]
+            merged = normalize_whitespace("\n\n".join(text for text, _ in text_segments), preserve_newlines=True)
             if not merged:
                 text_buffer = []
                 text_pages = []
                 return ""
 
             heading_meta = build_heading_metadata(heading_state)
-            page_range = self._page_range_from_pages(text_pages)
-            page_idx = page_range[0]
+            fallback_page_range = self._page_range_from_pages([page_idx for _, page_idx in text_segments])
+            searchable_parts: List[str] = []
+            source_spans: List[Dict[str, int]] = []
+            cursor = 0
+            for segment_text, segment_page_idx in text_segments:
+                if searchable_parts:
+                    cursor += 1
+                span_start = cursor
+                searchable_parts.append(segment_text)
+                cursor += len(segment_text)
+                source_spans.append(
+                    {
+                        "start": span_start,
+                        "end": cursor,
+                        "page_idx": segment_page_idx,
+                    }
+                )
+
+            searchable_merged = " ".join(searchable_parts)
+            search_start = 0
             emitted_last_text = ""
 
             for part in self._split_text(merged):
+                searchable_part = normalize_whitespace(part, preserve_newlines=False)
+                part_start = searchable_merged.find(searchable_part, search_start) if searchable_part else -1
+                if part_start < 0 and searchable_part:
+                    part_start = searchable_merged.find(searchable_part)
+
+                if part_start >= 0:
+                    part_end = part_start + len(searchable_part)
+                    part_pages = [
+                        span["page_idx"]
+                        for span in source_spans
+                        if span["end"] > part_start and span["start"] < part_end
+                    ]
+                    page_range = self._page_range_from_pages(part_pages) if part_pages else list(fallback_page_range)
+                    search_start = part_start + 1
+                else:
+                    page_range = list(fallback_page_range)
+
+                page_idx = page_range[0]
                 chunk_id = f"{doc_id}_chunk_{chunk_index}"
                 chunk_record = {
                     "chunk_id": chunk_id,

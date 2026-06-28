@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -10,8 +10,9 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from domain.qa import QARequest
-from exception import CollectionNotFoundException, ValidationException
+from exceptions import CollectionIndexingException, CollectionNotFoundException, ValidationException
 from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
+from service.pdf.index_queue import get_document_index_queue
 from service.retrieval.runtime import get_runtime_repository
 
 router = APIRouter()
@@ -57,6 +58,11 @@ def _compact_qa_response(response: dict[str, Any]) -> dict[str, Any]:
             "collection_name": retrieval_trace.get("collection_name", ""),
             "trace_id": retrieval_trace.get("trace_id", ""),
             "cache_hit": bool(retrieval_trace.get("cache_hit", False)),
+            "query_expansion_cache_hit": bool(retrieval_trace.get("query_expansion_cache_hit", False)),
+            "query_expansion_skipped": retrieval_trace.get("query_expansion_skipped", ""),
+            "llm_query_expansion_used": bool(retrieval_trace.get("llm_query_expansion_used", False)),
+            "llm_answer_cache_hit": bool((retrieval_trace.get("llm") or {}).get("answer_cache_hit", False)),
+            "final_response_cache_hit": bool(retrieval_trace.get("final_response_cache_hit", False)),
             "evidence_count": len(evidence),
             "citation_count": len(citations),
             "repository_collection_count": retrieval_trace.get("repository_collection_count", 0),
@@ -72,16 +78,53 @@ def _sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def _validate_qa_request(request: QARequest) -> str:
+def _stage_message(stage: str, status: str = "completed") -> str:
+    running_messages = {
+        "load_session": "正在加载会话",
+        "conversation_context": "正在整理上下文",
+        "intent_slot_understanding_agent": "正在识别意图槽位",
+        "select_skill_from_registry": "正在进行技能路由",
+        "clarify_gate": "正在判断是否需要澄清",
+        "parallel_hybrid_retrieval": "正在检索证据",
+        "retry_retrieval": "正在重试检索",
+        "evidence_decision": "正在校验证据",
+        "answer_generation": "正在生成回答",
+        "finalize_response": "正在整理响应",
+    }
+    completed_messages = {
+        "load_session": "会话加载完成",
+        "conversation_context": "上下文整理完成",
+        "intent_slot_understanding_agent": "意图槽位识别完成",
+        "select_skill_from_registry": "技能路由完成",
+        "clarify_gate": "澄清判断完成",
+        "parallel_hybrid_retrieval": "证据检索完成",
+        "retry_retrieval": "重试检索完成",
+        "evidence_decision": "证据校验完成",
+        "answer_generation": "回答生成完成",
+        "finalize_response": "响应整理完成",
+    }
+    if status == "running":
+        return running_messages.get(stage, stage or STREAM_WAITING_MESSAGE)
+    return completed_messages.get(stage, stage or STREAM_WAITING_MESSAGE)
+
+
+async def _validate_qa_request(request: QARequest) -> str:
     collection_name = str(request.collection_name or "").strip()
     if not collection_name:
         raise ValidationException("collection_name is required", detail={"collection_name": request.collection_name})
-    if get_runtime_repository().count_collection_chunks(collection_name) <= 0:
+    indexing_task = get_document_index_queue().get_collection_work(collection_name)
+    if indexing_task:
+        raise CollectionIndexingException(
+            collection_name,
+            task_id=str(indexing_task.get("task_id") or ""),
+            status=str(indexing_task.get("status") or ""),
+        )
+    if await get_runtime_repository().count_collection_chunks(collection_name) <= 0:
         raise CollectionNotFoundException(collection_name)
     return collection_name
 
 
-async def _run_qa(request: QARequest, collection_name: str) -> dict[str, Any]:
+async def _run_qa(request: QARequest, collection_name: str, progress_callback=None) -> dict[str, Any]:
     return await get_trusted_qa_workflow().ask(
         question=request.question,
         session_id=request.session_id or None,
@@ -89,12 +132,13 @@ async def _run_qa(request: QARequest, collection_name: str) -> dict[str, Any]:
         top_k=request.top_k,
         expand_query_num=request.expand_query_num,
         enable_cache=request.enable_cache,
+        progress_callback=progress_callback,
     )
 
 
 @router.post("/qa/ask")
 async def ask(request: QARequest):
-    collection_name = _validate_qa_request(request)
+    collection_name = await _validate_qa_request(request)
     response = await _run_qa(request, collection_name)
     if request.include_debug:
         return response
@@ -103,48 +147,36 @@ async def ask(request: QARequest):
 
 @router.post("/qa/ask/stream")
 async def ask_stream(request: QARequest):
-    collection_name = _validate_qa_request(request)
+    collection_name = await _validate_qa_request(request)
 
     async def event_stream():
         started_at = time.perf_counter()
+        progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
         def elapsed_ms() -> int:
             return int((time.perf_counter() - started_at) * 1000)
 
-        yield _sse_event(
-            "status",
-            {
-                "message": STREAM_WAITING_MESSAGE,
-                "stage": "load_session",
-                "status": "running",
-                "collection_name": collection_name,
-                "elapsed_ms": elapsed_ms(),
-            },
-        )
-        task = asyncio.create_task(_run_qa(request, collection_name))
-        stage_plan = [
-            ("conversation_context", "正在整理会话上下文"),
-            ("intent_slot_understanding_agent", "正在识别意图与槽位"),
-            ("select_skill_from_registry", "正在选择问答技能"),
-            ("clarify_gate", "正在检查是否需要澄清"),
-            ("parallel_hybrid_retrieval", "正在检索候选证据"),
-            ("evidence_decision", "正在核验证据质量"),
-            ("answer_generation", "正在生成可核查答案"),
-        ]
-        stage_index = 0
+        async def progress_callback(stage: dict[str, Any]) -> None:
+            await progress_queue.put(stage)
+
+        task = asyncio.create_task(_run_qa(request, collection_name, progress_callback=progress_callback))
         try:
             while True:
-                done, _ = await asyncio.wait({task}, timeout=2)
-                if done:
+                if task.done() and progress_queue.empty():
                     break
-                stage, message = stage_plan[min(stage_index, len(stage_plan) - 1)]
-                stage_index += 1
+                try:
+                    stage_event = await asyncio.wait_for(progress_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+                stage = str(stage_event.get("stage") or stage_event.get("phase") or "")
+                status = str(stage_event.get("status") or "completed")
                 yield _sse_event(
                     "status",
                     {
-                        "message": message,
+                        **stage_event,
+                        "message": _stage_message(stage, status),
                         "stage": stage,
-                        "status": "running",
+                        "status": status,
                         "collection_name": collection_name,
                         "elapsed_ms": elapsed_ms(),
                     },
@@ -184,3 +216,4 @@ async def ask_stream(request: QARequest):
             "X-Accel-Buffering": "no",
         },
     )
+

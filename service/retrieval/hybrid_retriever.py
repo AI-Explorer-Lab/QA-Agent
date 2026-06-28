@@ -24,7 +24,7 @@ class HybridRetriever:
         self.reranker = reranker or TwoStageHybridReranker(table_evidence_quota=table_evidence_quota)
         self.table_evidence_quota = max(0, int(table_evidence_quota))
 
-    def get_cached_stage1(
+    async def get_cached_stage1(
         self,
         question: str,
         collection_name: str,
@@ -33,7 +33,7 @@ class HybridRetriever:
     ) -> Dict[str, Any] | None:
         candidate_pool_size = max(1, int(getattr(self.reranker, "cross_encoder_candidate_pool", 30) or 30))
         stage_top_k = max(max(1, int(top_k)) * 4, candidate_pool_size)
-        return self.parallel_executor.get_cached_result(
+        return await self.parallel_executor.get_cached_result(
             question=question,
             collection_name=collection_name,
             top_k=stage_top_k,

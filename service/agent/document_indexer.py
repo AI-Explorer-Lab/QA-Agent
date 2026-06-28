@@ -238,9 +238,9 @@ class DocumentIndexService:
             )
 
             if index == 0:
-                self.session_service.upsert_collection_chunks(c_name, chunks, force_rebuild=force_rebuild)
+                await self.session_service.upsert_collection_chunks(c_name, chunks, force_rebuild=force_rebuild)
             else:
-                self.session_service.upsert_collection_chunks(c_name, chunks, force_rebuild=False)
+                await self.session_service.upsert_collection_chunks(c_name, chunks, force_rebuild=False)
 
         return {
             "collection_name": c_name,

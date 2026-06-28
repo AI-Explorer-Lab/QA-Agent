@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 
@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from middlewares.operation_log import log_operation_event
 
 try:
-    from exception import AppBaseException
+    from exceptions import AppBaseException
 except Exception:
     AppBaseException = None
 
@@ -39,3 +39,4 @@ async def app_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"code": "INTERNAL_ERROR", "message": str(exc), "path": str(request.url.path)},
     )
+

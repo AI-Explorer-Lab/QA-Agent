@@ -50,7 +50,7 @@ def _load_env_once() -> None:
         return
     env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
-        load_dotenv(env_path, override=False)
+        load_dotenv(env_path, override=False, encoding="utf-8-sig")
 
 
 def _env_truthy(name: str, default: bool) -> bool:

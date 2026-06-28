@@ -9,7 +9,7 @@ router = APIRouter()
 
 @router.get("/qa/sessions/{session_id}")
 async def get_session(session_id: str):
-    session = get_session_service().get_session(session_id)
+    session = await get_session_service().get_session(session_id)
     if session is None:
         return {"session_id": session_id, "messages": [], "retrieval_traces": []}
     return session

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import shutil
@@ -7,25 +7,20 @@ from pathlib import Path
 import re
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from exception.business_exception import ValidationException
+from domain.req import DocumentIndexRequest
+from exceptions.business_exception import ValidationException
 from service.pdf.document_indexer import get_document_indexing_service
 from service.pdf.index_progress import EVENT_TO_STEP, get_index_progress_tracker
+from service.pdf.index_queue import get_document_index_queue
 
 router = APIRouter()
 _PATH_FIELD_PATTERN = re.compile(
     r'(?P<prefix>"(?P<key>pdf_path|doc_source)"\s*:\s*")(?P<value>[^"]*)(?P<suffix>")'
 )
-
-
-class DocumentIndexRequest(BaseModel):
-    doc_source: str = ""
-    pdf_path: str
-    force_rebuild: bool = False
-    collection_name: str = "default"
 
 
 def _step_label(key: str) -> str:
@@ -308,6 +303,44 @@ async def index_documents(request: Request):
     return _augment_index_result(result, uploaded=False)
 
 
+@router.post("/documents/index/start", status_code=202)
+async def start_index_documents(request: Request):
+    payload = await _parse_document_index_request(request)
+    collection = (payload.collection_name or "default").strip() or "default"
+    tracker = get_index_progress_tracker()
+    source_name = Path(payload.doc_source or payload.pdf_path).name
+    task = tracker.create(collection_name=collection, file_name=source_name)
+    task_id = str(task["task_id"])
+    tracker.update_step(
+        task_id,
+        "upload",
+        status="skipped",
+        progress=100,
+        detail="Local PDF path provided",
+        fields={"pdf_path": payload.pdf_path},
+    )
+
+    async def run_index_task() -> None:
+        try:
+            result = await get_document_indexing_service().index_documents(
+                pdf_path=payload.pdf_path,
+                force_rebuild=payload.force_rebuild,
+                collection_name=collection,
+                doc_source=payload.doc_source or None,
+                progress_callback=_progress_callback_for(task_id),
+            )
+            tracker.complete(task_id, _augment_index_result(result, uploaded=False))
+        except Exception as exc:
+            tracker.fail(task_id, str(exc))
+
+    await get_document_index_queue().enqueue(
+        task_id=task_id,
+        collection_name=collection,
+        runner=run_index_task,
+    )
+    return tracker.get(task_id)
+
+
 @router.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(..., description="PDF file to index"),
@@ -335,9 +368,8 @@ async def upload_document(
         shutil.rmtree(str(target_path.parent), ignore_errors=True)
 
 
-@router.post("/documents/upload/start")
+@router.post("/documents/upload/start", status_code=202)
 async def start_upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF file to index"),
     collection_name: str = Form("default"),
     force_rebuild: bool = Form(False),
@@ -356,15 +388,22 @@ async def start_upload_document(
         detail="File saved and ready for indexing",
         fields={"file_name": original_name, "size_bytes": size_bytes},
     )
-    background_tasks.add_task(
-        _run_upload_index_task,
-        task_id,
-        str(target_path),
-        original_name,
-        size_bytes,
-        collection,
-        force_rebuild,
-        doc_source,
+
+    async def run_index_task() -> None:
+        await _run_upload_index_task(
+            task_id,
+            str(target_path),
+            original_name,
+            size_bytes,
+            collection,
+            force_rebuild,
+            doc_source,
+        )
+
+    await get_document_index_queue().enqueue(
+        task_id=task_id,
+        collection_name=collection,
+        runner=run_index_task,
     )
     return tracker.get(task_id)
 
@@ -375,3 +414,4 @@ async def get_document_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail={"task_id": task_id, "message": "Document task not found"})
     return task
+

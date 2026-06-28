@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime, timezone
 from typing import Iterable
 
 from sqlalchemy import text
 
-from database import get_sqlalchemy_engine, get_storage_backend
+from database import get_async_session, get_storage_backend
 from domain import Chunk
 from mapper.local_dev_repository import LocalDevRepository
 
@@ -27,9 +28,9 @@ class ChunkMapper:
 
         if self.backend == "local_dev":
             self.local_repository = local_repository or LocalDevRepository(database_url)
-            self.engine = None
+            self.database_url = database_url
         else:
-            self.engine = get_sqlalchemy_engine(backend="pgvector", database_url=database_url)
+            self.database_url = database_url
 
     @staticmethod
     def _now_utc() -> datetime:
@@ -69,14 +70,14 @@ class ChunkMapper:
     def _to_vector_literal(embedding: list[float]) -> str:
         return "[" + ",".join(str(value) for value in embedding) + "]"
 
-    def upsert_chunks(self, chunks: Iterable[Chunk]) -> int:
+    async def upsert_chunks(self, chunks: Iterable[Chunk]) -> int:
         records = list(chunks)
         if not records:
             return 0
 
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            return self.local_repository.upsert_chunks(records)
+            return await asyncio.to_thread(self.local_repository.upsert_chunks, records)
 
         statement = text(
             """
@@ -152,13 +153,13 @@ class ChunkMapper:
         )
 
         now_utc = self._now_utc()
-        with self.engine.begin() as connection:
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
             for chunk in records:
                 payload = chunk.model_dump(mode="json")
                 normalized_embedding = self._normalize_embedding(payload.get("embedding", []))
                 search_text = str(payload.get("search_text") or payload.get("content", ""))
 
-                connection.execute(
+                await session.execute(
                     statement,
                     {
                         "chunk_id": payload["chunk_id"],
@@ -185,12 +186,13 @@ class ChunkMapper:
                         "updated_at": payload.get("updated_at") or now_utc,
                     },
                 )
+            await session.commit()
         return len(records)
 
-    def upsert_chunk(self, chunk: Chunk) -> None:
-        self.upsert_chunks([chunk])
+    async def upsert_chunk(self, chunk: Chunk) -> None:
+        await self.upsert_chunks([chunk])
 
-    def list_by_collection(
+    async def list_by_collection(
         self,
         collection_name: str,
         doc_id: str | None = None,
@@ -198,10 +200,11 @@ class ChunkMapper:
     ) -> list[Chunk]:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            return self.local_repository.list_chunks_by_collection(
-                collection_name=collection_name,
-                doc_id=doc_id,
-                limit=limit,
+            return await asyncio.to_thread(
+                self.local_repository.list_chunks_by_collection,
+                collection_name,
+                doc_id,
+                limit,
             )
 
         if doc_id:
@@ -279,8 +282,8 @@ class ChunkMapper:
                 "limit": max(1, int(limit)),
             }
 
-        with self.engine.begin() as connection:
-            rows = connection.execute(query, params).mappings().all()
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            rows = (await session.execute(query, params)).mappings().all()
 
         chunks: list[Chunk] = []
         for row in rows:

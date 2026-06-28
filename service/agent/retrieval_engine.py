@@ -104,6 +104,7 @@ class RetrievalEngine:
                     "doc_id": raw.get("doc_id") or raw.get("doc_source") or "unknown_doc",
                     "doc_source": raw.get("doc_source") or raw.get("doc_id") or "unknown_source",
                     "page_idx": int(raw.get("page_idx", 0) or 0),
+                    "page_range": raw.get("page_range") or "",
                     "heading_path": raw.get("heading_path") or "front_matter",
                     "chunk_type": raw.get("chunk_type") or "text",
                     "content": content,
@@ -238,7 +239,7 @@ class RetrievalEngine:
             if value and value not in queries:
                 queries.append(value)
 
-        chunks = self._prepare_chunks(session_service.get_collection_chunks(collection_name))
+        chunks = self._prepare_chunks(await session_service.get_collection_chunks(collection_name))
         if not chunks:
             return {
                 "backend": "local_dev_fallback",

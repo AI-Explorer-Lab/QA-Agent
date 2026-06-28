@@ -135,7 +135,7 @@ class ParallelQueryExecutor:
         repository_collection_count = -1
         repository_count_error = ""
         try:
-            repository_collection_count = int(self.repository.count_collection_chunks(collection_name))
+            repository_collection_count = int(await self.repository.count_collection_chunks(collection_name))
         except Exception as exc:
             repository_count_error = str(exc)
         cache_hash = f"{question_hash}:r{repository_revision}:c{repository_collection_count}"
@@ -264,7 +264,7 @@ class ParallelQueryExecutor:
 
         return payload
 
-    def get_cached_result(
+    async def get_cached_result(
         self,
         question: str,
         collection_name: str,
@@ -278,7 +278,7 @@ class ParallelQueryExecutor:
         question_hash = stable_sha256(query_text)
         repository_revision = int(getattr(self.repository, "revision", 0) or 0)
         try:
-            repository_collection_count = int(self.repository.count_collection_chunks(collection_name))
+            repository_collection_count = int(await self.repository.count_collection_chunks(collection_name))
         except Exception:
             repository_collection_count = -1
         cache_hash = f"{question_hash}:r{repository_revision}:c{repository_collection_count}"
@@ -391,12 +391,11 @@ class ParallelQueryExecutor:
         async with semaphore:
             try:
                 result_map = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._execute_sparse_batch_sync,
-                        route,
-                        queries,
-                        collection_name,
-                        top_k,
+                    self._execute_sparse_batch(
+                        route=route,
+                        queries=queries,
+                        collection_name=collection_name,
+                        top_k=top_k,
                     ),
                     timeout=self.query_timeout_seconds,
                 )
@@ -425,7 +424,7 @@ class ParallelQueryExecutor:
             )
         return results
 
-    def _execute_sparse_batch_sync(
+    async def _execute_sparse_batch(
         self,
         route: str,
         queries: Sequence[str],
@@ -433,7 +432,7 @@ class ParallelQueryExecutor:
         top_k: int,
     ) -> Dict[str, list[Dict[str, Any]]]:
         if route == "table":
-            raw = self.repository.keyword_search_many(
+            raw = await self.repository.keyword_search_many(
                 collection_name=collection_name,
                 query_texts=queries,
                 top_k=top_k,
@@ -441,7 +440,7 @@ class ParallelQueryExecutor:
                 table_only=True,
             )
         else:
-            raw = self.repository.keyword_search_many(
+            raw = await self.repository.keyword_search_many(
                 collection_name=collection_name,
                 query_texts=queries,
                 top_k=top_k,
@@ -462,8 +461,7 @@ class ParallelQueryExecutor:
     ) -> list[Dict[str, Any]]:
         if route == "dense" and self.async_embedding_builder is not None:
             embedding = await self.async_embedding_builder(query)
-            rows = await asyncio.to_thread(
-                self.repository.dense_search,
+            rows = await self.repository.dense_search(
                 collection_name=collection_name,
                 query_embedding=embedding,
                 query_text=query,
@@ -471,15 +469,14 @@ class ParallelQueryExecutor:
                 chunk_type=None,
             )
             return [self._normalize_route_item(row, route, collection_name) for row in rows]
-        return await asyncio.to_thread(
-            self._execute_route_sync,
-            route,
-            query,
-            collection_name,
-            top_k,
+        return await self._execute_route(
+            route=route,
+            query=query,
+            collection_name=collection_name,
+            top_k=top_k,
         )
 
-    def _execute_route_sync(
+    async def _execute_route(
         self,
         route: str,
         query: str,
@@ -488,7 +485,7 @@ class ParallelQueryExecutor:
     ) -> list[Dict[str, Any]]:
         if route == "dense":
             embedding = self.embedding_builder(query, self.repository.embedding_dim)
-            rows = self.repository.dense_search(
+            rows = await self.repository.dense_search(
                 collection_name=collection_name,
                 query_embedding=embedding,
                 query_text=query,
@@ -498,14 +495,14 @@ class ParallelQueryExecutor:
             return [self._normalize_route_item(row, route, collection_name) for row in rows]
 
         if route == "table":
-            rows = self.repository.table_search(
+            rows = await self.repository.table_search(
                 collection_name=collection_name,
                 query_text=query,
                 top_k=top_k,
             )
             return [self._normalize_route_item(row, route, collection_name) for row in rows]
 
-        rows = self.repository.keyword_search(
+        rows = await self.repository.keyword_search(
             collection_name=collection_name,
             query_text=query,
             top_k=top_k,

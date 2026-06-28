@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from constant import (
     DOCUMENT_NOT_FOUND,
+    INDEXING_IN_PROGRESS,
     LOW_EVIDENCE,
     NOT_FOUND,
     RETRIEVAL_ERROR,
     SESSION_NOT_FOUND,
     VALIDATION_ERROR,
 )
-from exception.base_exception import AppBaseException
+from exceptions.base_exception import AppBaseException
 
 
 class ValidationException(AppBaseException):
@@ -37,6 +38,19 @@ class CollectionNotFoundException(AppBaseException):
             detail={"collection_name": collection_name},
         )
 
+class CollectionIndexingException(AppBaseException):
+    def __init__(self, collection_name: str, task_id: str = "", status: str = "") -> None:
+        detail = {"collection_name": collection_name}
+        if task_id:
+            detail["task_id"] = task_id
+        if status:
+            detail["status"] = status
+        super().__init__(
+            message=f"Collection is being indexed: {collection_name}",
+            code=INDEXING_IN_PROGRESS,
+            status_code=409,
+            detail=detail,
+        )
 
 class SessionNotFoundException(AppBaseException):
     def __init__(self, session_id: str) -> None:
@@ -56,3 +70,4 @@ class RetrievalException(AppBaseException):
 class LowEvidenceException(AppBaseException):
     def __init__(self, message: str, detail: dict | None = None) -> None:
         super().__init__(message=message, code=LOW_EVIDENCE, status_code=422, detail=detail or {})
+

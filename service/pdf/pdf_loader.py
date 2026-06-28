@@ -7,7 +7,7 @@ from typing import Iterable, List
 from utils.hash_utils import file_sha256
 
 try:  # pragma: no cover - optional integration point
-    from exception.business_exception import BusinessException as _BusinessException
+    from exceptions.base_exception import AppBaseException as _BusinessException
 except Exception:  # pragma: no cover - fallback for this repository stage
     class _BusinessException(RuntimeError):
         pass
@@ -71,3 +71,5 @@ def collect_pdf_documents(pdf_path: str | Path) -> List[PdfDocument]:
             )
         )
     return documents
+
+

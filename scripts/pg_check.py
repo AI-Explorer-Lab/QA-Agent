@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import asyncio
 from pathlib import Path
 
 
@@ -13,7 +14,7 @@ def _print(msg: str) -> None:
         print(msg)
 
 
-def main() -> int:
+async def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -24,7 +25,7 @@ def main() -> int:
         _print(f"[PG-CHECK] missing python-dotenv ({exc}). Try: python -m pip install python-dotenv")
         return 2
 
-    load_dotenv(project_root / ".env")
+    load_dotenv(project_root / ".env", encoding="utf-8-sig")
 
     try:
         from core.config_loader import load_runtime_env
@@ -41,18 +42,19 @@ def main() -> int:
         return 2
 
     try:
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text
+        from database import get_async_session
     except Exception as exc:
-        _print(f"[PG-CHECK] missing SQLAlchemy ({exc}). Try: python -m pip install sqlalchemy")
+        _print(f"[PG-CHECK] missing SQLAlchemy ({exc}). Try: python -m pip install sqlalchemy asyncpg")
         return 2
 
     try:
-        engine = create_engine(database_url, pool_pre_ping=True)
-        with engine.connect() as conn:
-            info = conn.execute(text("select current_database(), current_user")).fetchone()
+        async with get_async_session(backend="pgvector", database_url=database_url) as conn:
+            info = (await conn.execute(text("select current_database(), current_user"))).fetchone()
             _print(f"[PG-CHECK] connected db={info[0]} user={info[1]}")
 
-            exists = conn.execute(
+            exists = (
+                await conn.execute(
                 text(
                     """
                     select exists (
@@ -62,16 +64,18 @@ def main() -> int:
                     )
                     """
                 )
+                )
             ).scalar()
             _print(f"[PG-CHECK] pdf_chunks_exists={bool(exists)}")
             if not exists:
                 _print("[PG-CHECK] pdf_chunks table not found. Run schema init / build-index first.")
                 return 3
 
-            count = conn.execute(text("select count(*) from pdf_chunks")).scalar()
+            count = (await conn.execute(text("select count(*) from pdf_chunks"))).scalar()
             _print(f"[PG-CHECK] pdf_chunks_count={int(count)}")
 
-            rows = conn.execute(
+            rows = (
+                await conn.execute(
                 text(
                     """
                     select id, chunk_id, doc_id, left(content, 80) as preview, created_at
@@ -79,6 +83,7 @@ def main() -> int:
                     order by id desc
                     limit 5
                     """
+                )
                 )
             ).fetchall()
             _print(f"[PG-CHECK] latest_rows={len(rows)}")
@@ -90,9 +95,8 @@ def main() -> int:
                 )
         return 0
     except ModuleNotFoundError as exc:
-        # Most common: missing psycopg2 when URL is postgresql+psycopg2://...
         _print(f"[PG-CHECK] driver missing: {exc}")
-        _print("[PG-CHECK] Fix: python -m pip install psycopg2-binary pgvector")
+        _print("[PG-CHECK] Fix: python -m pip install asyncpg pgvector")
         _print("[PG-CHECK] Then restart your API / rerun build-index.")
         return 2
     except Exception as exc:
@@ -101,5 +105,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))
 

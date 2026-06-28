@@ -1,5 +1,6 @@
-﻿from exception.base_exception import AppBaseException, ConfigException, DatabaseException
-from exception.business_exception import (
+﻿from exceptions.base_exception import AppBaseException, ConfigException, DatabaseException
+from exceptions.business_exception import (
+    CollectionIndexingException,
     CollectionNotFoundException,
     DocumentNotFoundException,
     LowEvidenceException,
@@ -10,6 +11,7 @@ from exception.business_exception import (
 
 __all__ = [
     "AppBaseException",
+    "CollectionIndexingException",
     "CollectionNotFoundException",
     "ConfigException",
     "DatabaseException",
@@ -19,3 +21,4 @@ __all__ = [
     "SessionNotFoundException",
     "ValidationException",
 ]
+
