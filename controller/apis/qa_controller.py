@@ -10,8 +10,9 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from domain.qa import QARequest
-from exceptions import CollectionNotFoundException, ValidationException
+from exceptions import CollectionIndexingException, CollectionNotFoundException, ValidationException
 from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
+from service.pdf.index_queue import get_document_index_queue
 from service.retrieval.runtime import get_runtime_repository
 
 router = APIRouter()
@@ -111,6 +112,13 @@ async def _validate_qa_request(request: QARequest) -> str:
     collection_name = str(request.collection_name or "").strip()
     if not collection_name:
         raise ValidationException("collection_name is required", detail={"collection_name": request.collection_name})
+    indexing_task = get_document_index_queue().get_collection_work(collection_name)
+    if indexing_task:
+        raise CollectionIndexingException(
+            collection_name,
+            task_id=str(indexing_task.get("task_id") or ""),
+            status=str(indexing_task.get("status") or ""),
+        )
     if await get_runtime_repository().count_collection_chunks(collection_name) <= 0:
         raise CollectionNotFoundException(collection_name)
     return collection_name

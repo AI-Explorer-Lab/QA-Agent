@@ -38,6 +38,7 @@ from database import bootstrap_database, dispose_async_engines
 from exceptions.exception_handler import app_exception_handler
 from middlewares.operation_log import log_operation_event
 from middlewares.request_log import RequestLogMiddleware
+from service.pdf.index_queue import get_document_index_queue
 from utils.config_loader import get_app_config
 
 config = get_app_config()
@@ -88,9 +89,12 @@ async def lifespan(app: FastAPI):
     if _bootstrap_db_enabled():
         await bootstrap_database()
     await preload_runtime_models()
+    index_queue = get_document_index_queue()
+    index_queue.start()
     try:
         yield
     finally:
+        await index_queue.stop()
         await dispose_async_engines()
 
 
