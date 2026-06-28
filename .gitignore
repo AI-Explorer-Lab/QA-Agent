@@ -32,5 +32,6 @@ tmp_pip_proxy/
 .DS_store
 项目解读/
 log/
+plan/
 tests/
 .claude/
