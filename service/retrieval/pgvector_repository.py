@@ -222,16 +222,23 @@ class PgvectorRepository:
 
         if self.backend == "pgvector":
             await self._ensure_schema_ready()
-            sql = text(
+            chunk_sql = text(
+                "DELETE FROM pdf_chunks WHERE collection_name = :collection_name AND doc_source = :doc_source"
+            )
+            doc_sql = text(
                 "DELETE FROM pdf_documents WHERE collection_name = :collection_name AND doc_source = :doc_source"
             )
             async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
-                result = await session.execute(
-                    sql,
+                chunk_result = await session.execute(
+                    chunk_sql,
+                    {"collection_name": collection, "doc_source": source},
+                )
+                doc_result = await session.execute(
+                    doc_sql,
                     {"collection_name": collection, "doc_source": source},
                 )
                 await session.commit()
-                return int(getattr(result, "rowcount", 0) or 0)
+                return int(getattr(chunk_result, "rowcount", 0) or 0) + int(getattr(doc_result, "rowcount", 0) or 0)
 
         if self.backend == "local_dev":
             before = len(self._local_chunks)

@@ -147,8 +147,8 @@ reranker:
   cross_encoder_batch_size: 8
   cross_encoder_max_length: 512
   cross_encoder_local_files_only: false
-  cross_encoder_preload_on_startup: false
-  cross_encoder_load_on_request: false
+  cross_encoder_preload_on_startup: true
+  cross_encoder_load_on_request: true
 cache:
   enabled: true
   ttl_seconds: 3600

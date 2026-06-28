@@ -298,6 +298,161 @@ class SessionService:
             "retrieval_traces": traces,
         }
 
+    async def list_sessions(self, collection_name: str = "default", limit: int = 30) -> Dict[str, Any]:
+        cname = _clean_str(collection_name) or "default"
+        safe_limit = max(1, min(int(limit or 30), 100))
+        async with get_async_session(backend=self.backend) as db_session:
+            rows = (
+                await db_session.execute(
+                text(
+                    """
+                    WITH latest_user AS (
+                        SELECT DISTINCT ON (session_id)
+                               session_id,
+                               question AS last_user_question,
+                               created_at AS last_user_at
+                        FROM qa_messages
+                        WHERE role = 'user'
+                        ORDER BY session_id, created_at DESC, message_id DESC
+                    ),
+                    latest_assistant AS (
+                        SELECT DISTINCT ON (session_id)
+                               session_id,
+                               decision AS last_decision,
+                               query_type AS last_query_type,
+                               confidence AS last_confidence,
+                               citations_json,
+                               evidence_json,
+                               metadata_json,
+                               retrieval_trace_id,
+                               created_at AS last_assistant_at
+                        FROM qa_messages
+                        WHERE role = 'assistant'
+                        ORDER BY session_id, created_at DESC, message_id DESC
+                    ),
+                    message_counts AS (
+                        SELECT
+                            session_id,
+                            COUNT(*) AS message_count,
+                            COUNT(*) FILTER (WHERE role = 'user') AS turn_count
+                        FROM qa_messages
+                        GROUP BY session_id
+                    )
+                    SELECT
+                        s.session_id,
+                        s.collection_name,
+                        s.metadata_json,
+                        s.created_at,
+                        s.updated_at,
+                        COALESCE(mc.message_count, 0) AS message_count,
+                        COALESCE(mc.turn_count, 0) AS turn_count,
+                        lu.last_user_question,
+                        lu.last_user_at,
+                        la.last_decision,
+                        la.last_query_type,
+                        la.last_confidence,
+                        la.citations_json,
+                        la.evidence_json,
+                        la.metadata_json AS assistant_metadata_json,
+                        la.retrieval_trace_id,
+                        la.last_assistant_at
+                    FROM qa_sessions s
+                    LEFT JOIN latest_user lu ON lu.session_id = s.session_id
+                    LEFT JOIN latest_assistant la ON la.session_id = s.session_id
+                    LEFT JOIN message_counts mc ON mc.session_id = s.session_id
+                    WHERE s.collection_name = :collection_name
+                    ORDER BY s.updated_at DESC, s.session_id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"collection_name": cname, "limit": safe_limit},
+                )
+            ).mappings().all()
+
+        sessions: List[Dict[str, Any]] = []
+        for row in rows:
+            session_metadata = _json_loads(row.get("metadata_json"), {})
+            assistant_metadata = _json_loads(row.get("assistant_metadata_json"), {})
+            citations = _json_loads(row.get("citations_json"), [])
+            evidence = _json_loads(row.get("evidence_json"), [])
+            turn_routing = assistant_metadata.get("turn_routing") if isinstance(assistant_metadata, dict) else {}
+            if not isinstance(turn_routing, dict):
+                turn_routing = {}
+            focus = session_metadata.get("conversation_focus") if isinstance(session_metadata, dict) else None
+            if not isinstance(focus, dict):
+                focus = None
+            title = _clean_str(row.get("last_user_question")) or "新对话"
+            turn_type = ""
+            if isinstance(assistant_metadata, dict):
+                turn_type = _clean_str(turn_routing.get("turn_type") or assistant_metadata.get("turn_type"))
+            sessions.append(
+                {
+                    "session_id": row.get("session_id"),
+                    "collection_name": row.get("collection_name") or cname,
+                    "title": title[:80],
+                    "message_count": int(row.get("message_count") or 0),
+                    "turn_count": int(row.get("turn_count") or 0),
+                    "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else "",
+                    "created_at": row.get("created_at").isoformat() if row.get("created_at") else "",
+                    "last_user_question": row.get("last_user_question") or "",
+                    "last_decision": row.get("last_decision") or "",
+                    "last_query_type": row.get("last_query_type") or "",
+                    "last_confidence": float(row.get("last_confidence") or 0.0),
+                    "citation_count": len(citations) if isinstance(citations, list) else 0,
+                    "evidence_count": len(evidence) if isinstance(evidence, list) else 0,
+                    "retrieval_trace_id": row.get("retrieval_trace_id") or "",
+                    "turn_type": turn_type,
+                    "context_source": turn_routing.get("context_source") or "",
+                    "conversation_focus": focus,
+                    "last_activity_at": (
+                        row.get("last_assistant_at").isoformat()
+                        if row.get("last_assistant_at")
+                        else row.get("last_user_at").isoformat()
+                        if row.get("last_user_at")
+                        else row.get("updated_at").isoformat()
+                        if row.get("updated_at")
+                        else ""
+                    ),
+                }
+            )
+        return {"collection_name": cname, "sessions": sessions}
+
+    async def delete_session(self, session_id: str) -> Dict[str, Any]:
+        sid = _clean_str(session_id)
+        if not sid:
+            return {"session_id": "", "deleted": False, "deleted_counts": {}}
+
+        async with get_async_session(backend=self.backend) as session:
+            evaluation_result = await session.execute(
+                text("DELETE FROM evaluation_records WHERE session_id = :session_id"),
+                {"session_id": sid},
+            )
+            trace_result = await session.execute(
+                text("DELETE FROM retrieval_traces WHERE session_id = :session_id"),
+                {"session_id": sid},
+            )
+            message_result = await session.execute(
+                text("DELETE FROM qa_messages WHERE session_id = :session_id"),
+                {"session_id": sid},
+            )
+            session_result = await session.execute(
+                text("DELETE FROM qa_sessions WHERE session_id = :session_id"),
+                {"session_id": sid},
+            )
+            await session.commit()
+
+        counts = {
+            "evaluation_records": int(evaluation_result.rowcount or 0),
+            "retrieval_traces": int(trace_result.rowcount or 0),
+            "qa_messages": int(message_result.rowcount or 0),
+            "qa_sessions": int(session_result.rowcount or 0),
+        }
+        return {
+            "session_id": sid,
+            "deleted": counts["qa_sessions"] > 0,
+            "deleted_counts": counts,
+        }
+
     async def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]) -> None:
         sid = _clean_str(session_id)
         if not sid:

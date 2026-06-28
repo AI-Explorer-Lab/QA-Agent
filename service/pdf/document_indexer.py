@@ -17,7 +17,7 @@ from service.embedding.embedding_service import EmbeddingService, build_embeddin
 from service.pdf.mineru_client import MinerUClient
 from service.pdf.pdf_loader import collect_pdf_documents
 from service.pdf.structured_chunker import ChunkingConfig, StructuredChunker
-from service.retrieval.runtime import get_runtime_repository, replace_collection_chunks, upsert_runtime_chunks
+from service.retrieval.runtime import get_runtime_repository, upsert_runtime_chunks
 from service.session.session_service import get_session_service
 from utils.config_loader import get_app_config
 from utils.hash_utils import short_hash
@@ -161,6 +161,7 @@ class DocumentIndexingService:
             skipped_documents: List[Dict[str, Any]] = []
 
             doc_sources_to_replace: set[str] = set()
+            force_rebuild_doc_sources: set[str] = set()
             runtime_repository = get_runtime_repository()
             for pdf_doc in pdf_documents:
                 doc_source_value = str((doc_source or str(pdf_doc.path)) or "").strip() or str(pdf_doc.path)
@@ -400,6 +401,8 @@ class DocumentIndexingService:
                         normalized_chunks.append(normalized)
 
                     all_chunks.extend(normalized_chunks)
+                    if force_rebuild:
+                        force_rebuild_doc_sources.add(doc_source_value)
                     document_summary = {
                         "doc_id": doc_id,
                         "collection_name": collection,
@@ -471,17 +474,15 @@ class DocumentIndexingService:
                 effective_vector_backend=effective_backend,
             )
             try:
-                if force_rebuild:
-                    indexed_count = await replace_collection_chunks(collection, all_chunks)
-                else:
-                    if doc_sources_to_replace:
-                        for source in sorted(doc_sources_to_replace):
-                            await runtime_repository.delete_documents_by_source(collection, source)
-                            try:
-                                await self.session_service.delete_collection_doc_source(collection, source)
-                            except Exception:
-                                pass
-                    indexed_count = await upsert_runtime_chunks(all_chunks)
+                sources_to_delete = force_rebuild_doc_sources if force_rebuild else doc_sources_to_replace
+                if sources_to_delete:
+                    for source in sorted(sources_to_delete):
+                        await runtime_repository.delete_documents_by_source(collection, source)
+                        try:
+                            await self.session_service.delete_collection_doc_source(collection, source)
+                        except Exception:
+                            pass
+                indexed_count = await upsert_runtime_chunks(all_chunks)
                 session_result = await self.session_service.upsert_collection_chunks(
                     collection,
                     all_chunks,

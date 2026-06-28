@@ -8,7 +8,9 @@ Trusted QA service for enterprise PDF documents. The active system is centered o
 GET  /health
 POST /documents/index
 POST /qa/ask
+GET  /qa/sessions
 GET  /qa/sessions/{session_id}
+DELETE /qa/sessions/{session_id}
 ```
 
 ## Runtime Path
