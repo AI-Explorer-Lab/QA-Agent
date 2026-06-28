@@ -1,9 +1,12 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
+import copy
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from service.agent.answer_generator import AnswerGenerator
@@ -31,6 +34,7 @@ except Exception:
 
 
 _LANGGRAPH_BYPASS: ContextVar[bool] = ContextVar("trusted_qa_langgraph_bypass", default=False)
+ProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -80,6 +84,66 @@ def _usable_llm_answer(answer: Any) -> bool:
 
 def _duration_ms(started_at: float) -> int:
     return int((time.perf_counter() - started_at) * 1000)
+
+
+def _progress_stage_from_observation(item: Dict[str, Any]) -> Dict[str, Any] | None:
+    phase = str(item.get("phase") or "").strip()
+    if not phase:
+        return None
+    return {
+        "phase": phase,
+        "stage": phase,
+        "status": "completed",
+        "duration_ms": int(item.get("duration_ms") or 0),
+        "timed": "duration_ms" in item,
+        "cache_hit": bool(item.get("cache_hit", False)),
+        "cache_precheck_hit": bool(item.get("cache_precheck_hit", False)),
+        "query_expansion_cache_hit": bool(item.get("query_expansion_cache_hit", False)),
+        "query_expansion_skipped": str(item.get("query_expansion_skipped") or ""),
+        "llm_answer_cache_hit": bool(item.get("llm_answer_cache_hit", False)),
+        "llm_query_expansion_used": bool(item.get("llm_query_expansion_used", False)),
+        "evidence_count": int(item.get("evidence_count") or 0),
+    }
+
+
+async def _emit_progress_stage(progress_callback: ProgressCallback | None, item: Dict[str, Any]) -> None:
+    if progress_callback is None:
+        return
+    stage = _progress_stage_from_observation(item)
+    if stage is not None:
+        await progress_callback(stage)
+
+
+async def _emit_progress_marker(progress_callback: ProgressCallback | None, phase: str, status: str = "running", **extra: Any) -> None:
+    if progress_callback is None:
+        return
+    stage = {
+        "phase": phase,
+        "stage": phase,
+        "status": status,
+        "duration_ms": int(extra.pop("duration_ms", 0) or 0),
+        "timed": bool(extra.pop("timed", False)),
+        "cache_hit": bool(extra.pop("cache_hit", False)),
+        "cache_precheck_hit": bool(extra.pop("cache_precheck_hit", False)),
+        "query_expansion_cache_hit": bool(extra.pop("query_expansion_cache_hit", False)),
+        "query_expansion_skipped": str(extra.pop("query_expansion_skipped", "") or ""),
+        "llm_answer_cache_hit": bool(extra.pop("llm_answer_cache_hit", False)),
+        "llm_query_expansion_used": bool(extra.pop("llm_query_expansion_used", False)),
+        "evidence_count": int(extra.pop("evidence_count", 0) or 0),
+    }
+    stage.update(extra)
+    await progress_callback(stage)
+
+
+async def _emit_response_finalize_stage(progress_callback: ProgressCallback | None, response: Dict[str, Any]) -> None:
+    if progress_callback is None:
+        return
+    stages = response.get("retrieval_trace", {}).get("progress_stages", [])
+    if not isinstance(stages, list) or not stages:
+        return
+    final_stage = stages[-1]
+    if isinstance(final_stage, dict) and final_stage.get("phase") == "finalize_response":
+        await _emit_progress_stage(progress_callback, final_stage)
 
 
 class TrustedQAWorkflow:
@@ -140,6 +204,14 @@ class TrustedQAWorkflow:
         self.query_expansion_cache_ttl_seconds = max(1, int(cache_cfg.get("query_expansion_cache_ttl_seconds", cache_cfg.get("ttl_seconds", 3600))))
         self.query_expansion_cache_max_items = max(1, int(cache_cfg.get("query_expansion_cache_max_items", min(int(cache_cfg.get("max_items", 5000)), 1024))))
         self._query_expansion_cache: Dict[tuple[str, str, int], tuple[float, List[str], List[str]]] = {}
+        self.answer_cache_enabled = bool(cache_cfg.get("answer_cache_enabled", cache_cfg.get("enabled", True)))
+        self.answer_cache_ttl_seconds = max(1, int(cache_cfg.get("answer_cache_ttl_seconds", cache_cfg.get("ttl_seconds", 3600))))
+        self.answer_cache_max_items = max(1, int(cache_cfg.get("answer_cache_max_items", min(int(cache_cfg.get("max_items", 5000)), 1024))))
+        self._answer_cache: Dict[str, tuple[float, str]] = {}
+        self.response_cache_enabled = bool(cache_cfg.get("response_cache_enabled", cache_cfg.get("enabled", True)))
+        self.response_cache_ttl_seconds = max(1, int(cache_cfg.get("response_cache_ttl_seconds", cache_cfg.get("ttl_seconds", 3600))))
+        self.response_cache_max_items = max(1, int(cache_cfg.get("response_cache_max_items", min(int(cache_cfg.get("max_items", 5000)), 1024))))
+        self._response_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         workflow_cfg = self.config.get("workflow", {}) if isinstance(self.config.get("workflow"), dict) else {}
         self.langgraph_enabled = _env_truthy(
             "TRUSTED_QA_ENABLE_LANGGRAPH",
@@ -180,6 +252,116 @@ class TrustedQAWorkflow:
             self._query_expansion_cache.pop(oldest_key, None)
         key = self._query_expansion_cache_key(question, query_type, expand_query_num)
         self._query_expansion_cache[key] = (time.time(), list(expanded), list(llm_expanded))
+
+    def _answer_cache_key(
+        self,
+        question: str,
+        query_type: str,
+        evidence: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+    ) -> str:
+        evidence_fingerprint = []
+        for item in evidence:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            evidence_fingerprint.append(
+                {
+                    "chunk_id": item.get("chunk_id", ""),
+                    "doc_id": item.get("doc_id", ""),
+                    "doc_source": item.get("doc_source", ""),
+                    "content": item.get("content", ""),
+                    "page_idx": metadata.get("page_idx"),
+                    "heading_path": metadata.get("heading_path", ""),
+                }
+            )
+        citation_fingerprint = [
+            {
+                "chunk_id": item.get("chunk_id", ""),
+                "doc_id": item.get("doc_id", ""),
+                "quote": item.get("quote", ""),
+            }
+            for item in citations
+        ]
+        payload = {
+            "version": "grounded-answer-v1",
+            "question": str(question or "").strip(),
+            "query_type": str(query_type or "fact_lookup"),
+            "provider": str(getattr(self.llm_service, "provider_name", "")),
+            "model": str(getattr(self.llm_service, "model", "")),
+            "evidence": evidence_fingerprint,
+            "citations": citation_fingerprint,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _get_cached_answer(self, cache_key: str) -> str | None:
+        if not self.answer_cache_enabled:
+            return None
+        cached = self._answer_cache.get(cache_key)
+        if cached is None:
+            return None
+        cached_at, answer = cached
+        if time.time() - cached_at > self.answer_cache_ttl_seconds:
+            self._answer_cache.pop(cache_key, None)
+            return None
+        return str(answer or "").strip() or None
+
+    def _store_answer_cache(self, cache_key: str, answer: str | None) -> None:
+        text = str(answer or "").strip()
+        if not self.answer_cache_enabled or not text:
+            return
+        if len(self._answer_cache) >= self.answer_cache_max_items:
+            oldest_key = min(self._answer_cache.items(), key=lambda item: item[1][0])[0]
+            self._answer_cache.pop(oldest_key, None)
+        self._answer_cache[cache_key] = (time.time(), text)
+
+    async def _response_cache_key(
+        self,
+        question: str,
+        collection_name: str,
+        query_type: str,
+        top_k: int,
+        expand_query_num: int,
+    ) -> str:
+        repository = getattr(getattr(self.retriever, "parallel_executor", None), "repository", None)
+        repository_revision = int(getattr(repository, "revision", 0) or 0)
+        try:
+            repository_collection_count = int(await repository.count_collection_chunks(collection_name)) if repository is not None else -1
+        except Exception:
+            repository_collection_count = -1
+        payload = {
+            "version": "qa-response-v1",
+            "question": str(question or "").strip(),
+            "collection_name": str(collection_name or "default"),
+            "query_type": str(query_type or "fact_lookup"),
+            "top_k": max(1, int(top_k)),
+            "expand_query_num": max(1, int(expand_query_num)),
+            "provider": str(getattr(self.llm_service, "provider_name", "")),
+            "model": str(getattr(self.llm_service, "model", "")),
+            "repository_revision": repository_revision,
+            "repository_collection_count": repository_collection_count,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _get_cached_response(self, cache_key: str) -> Dict[str, Any] | None:
+        if not self.response_cache_enabled:
+            return None
+        cached = self._response_cache.get(cache_key)
+        if cached is None:
+            return None
+        cached_at, response = cached
+        if time.time() - cached_at > self.response_cache_ttl_seconds:
+            self._response_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(response)
+
+    def _store_response_cache(self, cache_key: str | None, response: Dict[str, Any]) -> None:
+        if not self.response_cache_enabled or not cache_key:
+            return
+        if len(self._response_cache) >= self.response_cache_max_items:
+            oldest_key = min(self._response_cache.items(), key=lambda item: item[1][0])[0]
+            self._response_cache.pop(oldest_key, None)
+        self._response_cache[cache_key] = (time.time(), copy.deepcopy(response))
 
     async def _expand_queries_for_retrieval(
         self,
@@ -257,11 +439,13 @@ class TrustedQAWorkflow:
         trace["query_expansion_skipped"] = "retrieval_cache_hit" if cache_precheck_hit else ("query_expansion_cache_hit" if query_expansion_cache_hit else "")
         trace["query_expansion_cache_hit"] = bool(query_expansion_cache_hit)
         trace["llm_query_expansion_used"] = bool(llm_expansion_used)
+        query_expansion_skipped = str(trace.get("query_expansion_skipped") or "")
         stage = {
             "phase": "parallel_hybrid_retrieval",
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "cache_precheck_hit": cache_precheck_hit,
             "query_expansion_cache_hit": query_expansion_cache_hit,
+            "query_expansion_skipped": query_expansion_skipped,
             "cache_hit": bool(trace.get("cache_hit", False)),
             "llm_query_expansion_used": bool(llm_expansion_used),
             "query_variant_count": len(expanded),
@@ -602,18 +786,38 @@ class TrustedQAWorkflow:
             decision = "refuse"
         answer_payload = self.answer_generator.generate(question=question, query_type=query_type, evidence=evidence, decision=decision, gate_reason=gate.get("reason", ""))
         llm_answer_used = False
+        llm_answer_cache_hit = False
         if decision == "answer":
-            llm_answer = await self.llm_service.generate_grounded_answer(
-                question=question,
-                query_type=query_type,
-                evidence=answer_payload.get("evidence", []),
-                citations=answer_payload.get("citations", []),
+            answer_cache_key = self._answer_cache_key(
+                question,
+                query_type,
+                list(answer_payload.get("evidence") or []),
+                list(answer_payload.get("citations") or []),
             )
+            llm_answer = self._get_cached_answer(answer_cache_key) if bool(state.get("enable_cache", True)) else None
+            if llm_answer:
+                llm_answer_cache_hit = True
+            else:
+                llm_answer = await self.llm_service.generate_grounded_answer(
+                    question=question,
+                    query_type=query_type,
+                    evidence=answer_payload.get("evidence", []),
+                    citations=answer_payload.get("citations", []),
+                )
             if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
-                llm_answer_used = True
+                llm_answer_used = not llm_answer_cache_hit
+                if not llm_answer_cache_hit and bool(state.get("enable_cache", True)):
+                    self._store_answer_cache(answer_cache_key, llm_answer)
         observations = list(state.get("observations") or [])
-        observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(started_at), "llm_answer_used": llm_answer_used})
+        observations.append(
+            {
+                "phase": "answer_generation",
+                "duration_ms": _duration_ms(started_at),
+                "llm_answer_used": llm_answer_used,
+                "llm_answer_cache_hit": llm_answer_cache_hit,
+            }
+        )
         response = self._build_response(
             str(state.get("sid") or ""),
             query_type,
@@ -627,7 +831,16 @@ class TrustedQAWorkflow:
             gate=gate,
         )
         next_state = dict(state)
-        next_state.update({"response": response, "decision": decision, "gate": gate, "llm_answer_used": llm_answer_used, "observations": observations})
+        next_state.update(
+            {
+                "response": response,
+                "decision": decision,
+                "gate": gate,
+                "llm_answer_used": llm_answer_used,
+                "llm_answer_cache_hit": llm_answer_cache_hit,
+                "observations": observations,
+            }
+        )
         return next_state
 
     async def _graph_persist_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -647,6 +860,7 @@ class TrustedQAWorkflow:
             gate=state.get("gate") or {},
             llm_expansion_used=bool(state.get("llm_expansion_used")),
             llm_answer_used=bool(state.get("llm_answer_used")),
+            llm_answer_cache_hit=bool(state.get("llm_answer_cache_hit")),
             workflow_runner="langgraph",
             evaluate=response.get("decision") != "clarify",
             question=str(state.get("effective_question") or state.get("question") or ""),
@@ -713,7 +927,18 @@ class TrustedQAWorkflow:
         top_k: int = 5,
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
+        if progress_callback is not None:
+            return await self._ask_legacy(
+                question=question,
+                collection_name=collection_name,
+                session_id=session_id,
+                top_k=top_k,
+                expand_query_num=expand_query_num,
+                enable_cache=enable_cache,
+                progress_callback=progress_callback,
+            )
         langgraph_response = await self._maybe_run_langgraph(question=question, collection_name=collection_name, session_id=session_id, top_k=top_k, expand_query_num=expand_query_num, enable_cache=enable_cache)
         if isinstance(langgraph_response, dict):
             return langgraph_response
@@ -726,34 +951,26 @@ class TrustedQAWorkflow:
         top_k: int = 5,
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         workflow_started_at = time.perf_counter()
         load_session_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "load_session")
         session = await self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
         load_session_duration_ms = _duration_ms(load_session_started_at)
+        observations: List[Dict[str, Any]] = [{"phase": "load_session", "session_id": sid, "duration_ms": load_session_duration_ms}]
+        await _emit_progress_stage(progress_callback, observations[-1])
+
         context_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "conversation_context")
         context = await self.conversation_context.prepare_context(session, question, collection_name)
         context_duration_ms = _duration_ms(context_started_at)
         original_question = str(context.get("original_question") or question)
         effective_question = str(context.get("effective_question") or question)
         conversation_state = context.get("conversation_state") or {}
         turn_route = context.get("turn_route") or {}
-        intent_started_at = time.perf_counter()
-        understanding = await self._understand_question(effective_question, conversation_context=turn_route)
-        intent_duration_ms = _duration_ms(intent_started_at)
-        intent_trace = dict(understanding.get("intent_trace") or {})
-        query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
-        skill_started_at = time.perf_counter()
-        selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
-        slots = dict(understanding.get("slots") or {})
-        skill_package = selected_skill.package_metadata()
-        skill_duration_ms = _duration_ms(skill_started_at)
-        clarify_started_at = time.perf_counter()
-        clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
-        clarify_duration_ms = _duration_ms(clarify_started_at)
-        observations: List[Dict[str, Any]] = [
-            {"phase": "load_session", "session_id": sid, "duration_ms": load_session_duration_ms},
+        observations.append(
             {
                 "phase": "conversation_context",
                 "turn_type": turn_route.get("turn_type", "new_rag_query"),
@@ -761,22 +978,50 @@ class TrustedQAWorkflow:
                 "effective_question": effective_question,
                 "history_refs": turn_route.get("history_refs", []),
                 "duration_ms": context_duration_ms,
-            },
-            {"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots, "duration_ms": intent_duration_ms},
-            {"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package, "duration_ms": skill_duration_ms},
+            }
+        )
+        await _emit_progress_stage(progress_callback, observations[-1])
+
+        intent_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "intent_slot_understanding_agent")
+        understanding = await self._understand_question(effective_question, conversation_context=turn_route)
+        intent_duration_ms = _duration_ms(intent_started_at)
+        intent_trace = dict(understanding.get("intent_trace") or {})
+        query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
+        slots = dict(understanding.get("slots") or {})
+        observations.append({"phase": "intent_slot_understanding_agent", "intent": intent_trace, "slots": slots, "duration_ms": intent_duration_ms})
+        await _emit_progress_stage(progress_callback, observations[-1])
+
+        skill_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "select_skill_from_registry")
+        selected_skill = understanding.get("selected_skill") or self.skill_registry.select_skill(query_type)
+        skill_package = selected_skill.package_metadata()
+        skill_duration_ms = _duration_ms(skill_started_at)
+        observations.append({"phase": "select_skill_from_registry", "selected_skill": selected_skill.skill_name, "skill_package": skill_package, "duration_ms": skill_duration_ms})
+        await _emit_progress_stage(progress_callback, observations[-1])
+
+        clarify_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "clarify_gate")
+        clarify = self._build_clarify_payload(query_type, collection_name, slots, selected_skill)
+        clarify_duration_ms = _duration_ms(clarify_started_at)
+        observations.append(
             {
                 "phase": "clarify_gate",
                 "slots": slots,
                 "missing_slots": clarify.get("missing_slots") or [],
                 "decision": clarify.get("decision") or "answer",
                 "duration_ms": clarify_duration_ms,
-            },
-        ]
+            }
+        )
+        await _emit_progress_stage(progress_callback, observations[-1])
 
         if clarify["decision"] == "clarify":
             answer_started_at = time.perf_counter()
+            await _emit_progress_marker(progress_callback, "answer_generation")
             answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=[], decision="clarify", gate_reason="missing_slots")
-            observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(answer_started_at), "llm_answer_used": False})
+            answer_observation = {"phase": "answer_generation", "duration_ms": _duration_ms(answer_started_at), "llm_answer_used": False}
+            observations.append(answer_observation)
+            await _emit_progress_stage(progress_callback, answer_observation)
             response = self._build_response(
                 sid,
                 query_type,
@@ -796,6 +1041,7 @@ class TrustedQAWorkflow:
                 gate={},
                 llm_expansion_used=False,
                 llm_answer_used=False,
+                llm_answer_cache_hit=False,
                 workflow_runner="python",
                 evaluate=False,
                 question=effective_question,
@@ -805,6 +1051,7 @@ class TrustedQAWorkflow:
                 turn_route=turn_route,
                 workflow_duration_ms=_duration_ms(workflow_started_at),
             )
+            await _emit_progress_marker(progress_callback, "finalize_response")
             await self._save(sid, original_question, response)
             await self._update_conversation_focus(
                 session_id=sid,
@@ -816,8 +1063,86 @@ class TrustedQAWorkflow:
                 turn_route=turn_route,
             )
             self._set_workflow_duration(response, _duration_ms(workflow_started_at))
+            await _emit_response_finalize_stage(progress_callback, response)
             return response
 
+        response_cache_key = await self._response_cache_key(
+            effective_question,
+            collection_name,
+            query_type,
+            max(1, int(top_k)),
+            max(1, int(expand_query_num)),
+        )
+        cached_response = self._get_cached_response(response_cache_key) if enable_cache else None
+        if cached_response is not None:
+            evidence_count = len(cached_response.get("evidence") or [])
+            cached_observations = list(observations)
+            cached_observations.extend(
+                [
+                    {
+                        "phase": "parallel_hybrid_retrieval",
+                        "duration_ms": 0,
+                        "cache_hit": True,
+                        "cache_precheck_hit": True,
+                        "query_expansion_skipped": "final_response_cache_hit",
+                        "evidence_count": evidence_count,
+                    },
+                    {"phase": "evidence_decision", "duration_ms": 0, "evidence_count": evidence_count},
+                    {
+                        "phase": "answer_generation",
+                        "duration_ms": 0,
+                        "llm_answer_used": False,
+                        "llm_answer_cache_hit": True,
+                    },
+                ]
+            )
+            for cached_observation in cached_observations[len(observations) :]:
+                await _emit_progress_stage(progress_callback, cached_observation)
+            response = copy.deepcopy(cached_response)
+            response["session_id"] = sid
+            response["original_question"] = original_question
+            response["effective_question"] = effective_question
+            response.setdefault("retrieval_trace", {})
+            response["retrieval_trace"]["react_observations"] = cached_observations
+            response["react_observations"] = cached_observations
+            response["retrieval_trace"]["final_response_cache_hit"] = True
+            response["retrieval_trace"]["cache_hit"] = True
+            response["retrieval_trace"]["query_expansion_skipped"] = "final_response_cache_hit"
+            response = self._apply_response_traces(
+                response=response,
+                selected_skill=selected_skill,
+                skill_package=skill_package,
+                intent_trace=intent_trace,
+                slots=slots,
+                gate=response.get("retrieval_trace", {}).get("gate_decision") or {},
+                llm_expansion_used=False,
+                llm_answer_used=False,
+                llm_answer_cache_hit=True,
+                workflow_runner="python",
+                evaluate=True,
+                question=effective_question,
+                original_question=original_question,
+                effective_question=effective_question,
+                conversation_state=conversation_state,
+                turn_route=turn_route,
+                workflow_duration_ms=_duration_ms(workflow_started_at),
+            )
+            await _emit_progress_marker(progress_callback, "finalize_response")
+            await self._save(sid, original_question, response)
+            await self._update_conversation_focus(
+                session_id=sid,
+                effective_question=effective_question,
+                query_type=query_type,
+                slots=slots,
+                response=response,
+                conversation_state=conversation_state,
+                turn_route=turn_route,
+            )
+            self._set_workflow_duration(response, _duration_ms(workflow_started_at))
+            await _emit_response_finalize_stage(progress_callback, response)
+            return response
+
+        await _emit_progress_marker(progress_callback, "parallel_hybrid_retrieval")
         retrieval_result, expanded, llm_expanded, llm_expansion_used, retrieval_stage = await self._retrieve_with_cache_aware_expansion(
             question=effective_question,
             collection_name=collection_name,
@@ -827,8 +1152,11 @@ class TrustedQAWorkflow:
             enable_cache=enable_cache,
         )
         evidence = list(retrieval_result.get("evidence") or [])
-        observations.append({**retrieval_stage, "evidence_count": len(evidence)})
+        retrieval_observation = {**retrieval_stage, "evidence_count": len(evidence)}
+        observations.append(retrieval_observation)
+        await _emit_progress_stage(progress_callback, retrieval_observation)
         evidence_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "evidence_decision")
         gate = await self.evidence_decision.evaluate(
             question=effective_question,
             query_type=query_type,
@@ -839,11 +1167,14 @@ class TrustedQAWorkflow:
             retry_count=0,
             table_evidence_quota=self.table_evidence_quota,
         )
-        observations.append({"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate, "duration_ms": _duration_ms(evidence_started_at)})
+        evidence_observation = {"phase": "evidence_decision", "rule_gate": gate.get("rule_gate") or {}, "audit": gate.get("evidence_audit") or {}, "gate": gate, "duration_ms": _duration_ms(evidence_started_at)}
+        observations.append(evidence_observation)
+        await _emit_progress_stage(progress_callback, evidence_observation)
 
         retry_count = 0
         while gate.get("decision") == "retry" and retry_count < self.evidence_decision.retry_limit:
             retry_started_at = time.perf_counter()
+            await _emit_progress_marker(progress_callback, "retry_retrieval")
             retry_count += 1
             retry_question = str(gate.get("suggested_retry_query") or "").strip() or effective_question
             retry_expanded, retry_llm_expanded, retry_llm_expansion_used = await self._expand_queries_for_retrieval(
@@ -874,7 +1205,9 @@ class TrustedQAWorkflow:
                 retry_count=retry_count,
                 table_evidence_quota=self.table_evidence_quota,
             )
-            observations.append({"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "llm_expanded": retry_llm_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence), "duration_ms": _duration_ms(retry_started_at)})
+            retry_observation = {"phase": "retry_retrieval", "retry_count": retry_count, "retry_question": retry_question, "expanded_queries": retry_expanded, "llm_expanded": retry_llm_expanded, "audit": gate.get("evidence_audit") or {}, "rule_gate": gate.get("rule_gate") or {}, "gate": gate, "evidence_count": len(evidence), "duration_ms": _duration_ms(retry_started_at)}
+            observations.append(retry_observation)
+            await _emit_progress_stage(progress_callback, retry_observation)
 
         decision = gate.get("decision", "refuse")
         if decision == "retry":
@@ -886,19 +1219,40 @@ class TrustedQAWorkflow:
             decision = "refuse"
 
         answer_started_at = time.perf_counter()
+        await _emit_progress_marker(progress_callback, "answer_generation")
         answer_payload = self.answer_generator.generate(question=effective_question, query_type=query_type, evidence=evidence, decision=decision, gate_reason=gate.get("reason", ""))
         llm_answer_used = False
+        llm_answer_cache_hit = False
         if decision == "answer":
-            llm_answer = await self.llm_service.generate_grounded_answer(
-                question=effective_question,
-                query_type=query_type,
-                evidence=answer_payload.get("evidence", []),
-                citations=answer_payload.get("citations", []),
+            answer_cache_key = self._answer_cache_key(
+                effective_question,
+                query_type,
+                list(answer_payload.get("evidence") or []),
+                list(answer_payload.get("citations") or []),
             )
+            llm_answer = self._get_cached_answer(answer_cache_key) if enable_cache else None
+            if llm_answer:
+                llm_answer_cache_hit = True
+            else:
+                llm_answer = await self.llm_service.generate_grounded_answer(
+                    question=effective_question,
+                    query_type=query_type,
+                    evidence=answer_payload.get("evidence", []),
+                    citations=answer_payload.get("citations", []),
+                )
             if _usable_llm_answer(llm_answer):
                 answer_payload["answer"] = llm_answer
-                llm_answer_used = True
-        observations.append({"phase": "answer_generation", "duration_ms": _duration_ms(answer_started_at), "llm_answer_used": llm_answer_used})
+                llm_answer_used = not llm_answer_cache_hit
+                if not llm_answer_cache_hit and enable_cache:
+                    self._store_answer_cache(answer_cache_key, llm_answer)
+        answer_observation = {
+            "phase": "answer_generation",
+            "duration_ms": _duration_ms(answer_started_at),
+            "llm_answer_used": llm_answer_used,
+            "llm_answer_cache_hit": llm_answer_cache_hit,
+        }
+        observations.append(answer_observation)
+        await _emit_progress_stage(progress_callback, answer_observation)
         response = self._build_response(
             sid,
             query_type,
@@ -920,6 +1274,7 @@ class TrustedQAWorkflow:
             gate=gate,
             llm_expansion_used=llm_expansion_used,
             llm_answer_used=llm_answer_used,
+            llm_answer_cache_hit=llm_answer_cache_hit,
             workflow_runner="python",
             evaluate=True,
             question=effective_question,
@@ -929,6 +1284,9 @@ class TrustedQAWorkflow:
             turn_route=turn_route,
             workflow_duration_ms=_duration_ms(workflow_started_at),
         )
+        if enable_cache and decision == "answer":
+            self._store_response_cache(response_cache_key, response)
+        await _emit_progress_marker(progress_callback, "finalize_response")
         await self._save(sid, original_question, response)
         await self._update_conversation_focus(
             session_id=sid,
@@ -940,6 +1298,7 @@ class TrustedQAWorkflow:
             turn_route=turn_route,
         )
         self._set_workflow_duration(response, _duration_ms(workflow_started_at))
+        await _emit_response_finalize_stage(progress_callback, response)
         return response
 
     @staticmethod
@@ -968,6 +1327,10 @@ class TrustedQAWorkflow:
                     "duration_ms": residual,
                     "timed": True,
                     "cache_hit": False,
+                    "cache_precheck_hit": False,
+                    "query_expansion_cache_hit": False,
+                    "query_expansion_skipped": "",
+                    "llm_answer_cache_hit": False,
                     "llm_query_expansion_used": False,
                     "evidence_count": 0,
                 }
@@ -984,6 +1347,7 @@ class TrustedQAWorkflow:
         gate: Dict[str, Any],
         llm_expansion_used: bool,
         llm_answer_used: bool,
+        llm_answer_cache_hit: bool,
         workflow_runner: str,
         evaluate: bool,
         question: str,
@@ -995,7 +1359,13 @@ class TrustedQAWorkflow:
     ) -> Dict[str, Any]:
         trace_metadata = getattr(self.llm_service, "trace_metadata", None)
         llm_trace = trace_metadata() if callable(trace_metadata) else {}
-        llm_trace.update({"query_expansion_used": bool(llm_expansion_used), "answer_generation_used": bool(llm_answer_used)})
+        llm_trace.update(
+            {
+                "query_expansion_used": bool(llm_expansion_used),
+                "answer_generation_used": bool(llm_answer_used),
+                "answer_cache_hit": bool(llm_answer_cache_hit),
+            }
+        )
         original = str(original_question or question or "")
         effective = str(effective_question or question or "")
         route = dict(turn_route or {})
@@ -1085,6 +1455,10 @@ class TrustedQAWorkflow:
                     "duration_ms": int(item.get("duration_ms") or 0),
                     "timed": "duration_ms" in item,
                     "cache_hit": bool(item.get("cache_hit", False)),
+                    "cache_precheck_hit": bool(item.get("cache_precheck_hit", False)),
+                    "query_expansion_cache_hit": bool(item.get("query_expansion_cache_hit", False)),
+                    "query_expansion_skipped": str(item.get("query_expansion_skipped") or ""),
+                    "llm_answer_cache_hit": bool(item.get("llm_answer_cache_hit", False)),
                     "llm_query_expansion_used": bool(item.get("llm_query_expansion_used", False)),
                     "evidence_count": int(item.get("evidence_count") or 0),
                 }

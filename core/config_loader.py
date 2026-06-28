@@ -368,7 +368,7 @@ def load_runtime_env() -> Dict[str, str]:
     2) YAML defaults
     """
     # Always load project-root .env so runtime does not depend on current working directory.
-    load_dotenv(PROJECT_ROOT / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False, encoding="utf-8-sig")
 
     config_path = Path(os.getenv("APP_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
     yaml_config = _read_yaml(config_path)

@@ -25,7 +25,7 @@ async def main() -> int:
         _print(f"[PG-CHECK] missing python-dotenv ({exc}). Try: python -m pip install python-dotenv")
         return 2
 
-    load_dotenv(project_root / ".env")
+    load_dotenv(project_root / ".env", encoding="utf-8-sig")
 
     try:
         from core.config_loader import load_runtime_env

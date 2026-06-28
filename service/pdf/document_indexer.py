@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import logging
 from typing import Any, Callable, Dict, List
@@ -127,7 +128,7 @@ class DocumentIndexingService:
             collect_timer = start_operation_step("index.collect_documents", pdf_path=pdf_path)
             _notify_progress(progress_callback, "index.collect_documents", "started", pdf_path=pdf_path)
             try:
-                pdf_documents = collect_pdf_documents(pdf_path)
+                pdf_documents = await asyncio.to_thread(collect_pdf_documents, pdf_path)
             except Exception as exc:
                 _notify_progress(progress_callback, "index.collect_documents", "failed", error=str(exc))
                 fail_operation_step(collect_timer, exc)
@@ -229,7 +230,8 @@ class DocumentIndexingService:
                         doc_source=doc_source_value,
                     )
                     try:
-                        payload = self.mineru_client.parse_pdf_to_mineru_json(
+                        payload = await asyncio.to_thread(
+                            self.mineru_client.parse_pdf_to_mineru_json,
                             pdf_doc.path,
                             use_cache=True,
                             force_rebuild=force_rebuild,
@@ -269,7 +271,8 @@ class DocumentIndexingService:
                         page_count=page_count,
                     )
                     try:
-                        chunks = self.chunker.chunk_mineru_payload(
+                        chunks = await asyncio.to_thread(
+                            self.chunker.chunk_mineru_payload,
                             mineru_payload=payload,
                             doc_id=doc_id,
                             collection_name=collection,

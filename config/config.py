@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - dependency bootstrap fallback
+    load_dotenv = None  # type: ignore[assignment]
+
+try:
     from dynaconf import Dynaconf
 except Exception:  # pragma: no cover - dependency bootstrap fallback
     Dynaconf = None  # type: ignore[assignment]
@@ -19,6 +24,7 @@ except Exception:  # pragma: no cover
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.yaml"
+DEFAULT_DOTENV_PATH = PROJECT_ROOT / ".env"
 
 
 def _normalize_key(value: str) -> str:
@@ -45,11 +51,13 @@ def selected_environment() -> str:
 def build_settings(config_path: str | Path | None = None) -> Any:
     if Dynaconf is None:
         raise RuntimeError("dynaconf is not installed. Run `pip install -r requirements.txt`.")
+    if load_dotenv is not None and DEFAULT_DOTENV_PATH.exists():
+        load_dotenv(DEFAULT_DOTENV_PATH, override=False, encoding="utf-8-sig")
     path = Path(config_path or os.getenv("APP_CONFIG_PATH") or DEFAULT_CONFIG_PATH).expanduser()
     return Dynaconf(
         settings_files=[str(path)],
         environments=False,
-        load_dotenv=True,
+        load_dotenv=False,
         envvar_prefix="TRUSTED_QA",
         lowercase_read=True,
         merge_enabled=True,

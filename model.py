@@ -1,11 +1,12 @@
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from core.config_loader import get_llm_runtime_config, load_runtime_env
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False, encoding="utf-8-sig")
 load_runtime_env()
 
 
