@@ -1,4 +1,4 @@
-"""Load the project config/app.yaml file with graceful YAML fallback."""
+﻿"""Load the project config/app.yaml file with graceful YAML fallback."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from exception import ConfigException
+from exceptions import ConfigException
+
+try:
+    from config.config import load_app_config
+except Exception:  # pragma: no cover - bootstrap fallback
+    load_app_config = None  # type: ignore[assignment]
 
 try:
     import yaml  # type: ignore
@@ -61,7 +66,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "storage": {
         "backend": "pgvector",
         "pgvector": {
-            "database_url": "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/trusted_qa",
+            "database_url": "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trusted_qa",
             "embedding_dim": 1024,
         },
         "local_dev": {
@@ -372,6 +377,8 @@ def load_yaml_config(
     extra_paths: Iterable[str | Path] | None = None,
 ) -> dict[str, Any]:
     merged = copy.deepcopy(DEFAULT_CONFIG)
+    if config_root is None and extra_paths is None and load_app_config is not None:
+        return _deep_merge(merged, load_app_config())
     explicit_config_path = os.getenv("APP_CONFIG_PATH", "").strip()
 
     if config_root:
@@ -410,3 +417,4 @@ def get_app_config(reload: bool = False) -> dict[str, Any]:
     if reload:
         _cached_app_config.cache_clear()
     return copy.deepcopy(_cached_app_config())
+

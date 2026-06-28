@@ -2,7 +2,9 @@
 from domain.chunk import Chunk, ChunkType
 from domain.citation import Citation, Evidence
 from domain.document import Document, DocumentStatus
-from domain.qa import Decision, MessageRole, QAMessage, QARequest, QAResponse, QASession
+from domain.models import Decision, MessageRole, QAMessage, QASession
+from domain.req import DocumentIndexRequest, QARequest
+from domain.res import QAResponse
 from domain.retrieval import RetrievalCandidate, RetrievalTrace
 
 __all__ = [
@@ -13,6 +15,7 @@ __all__ = [
     "Citation",
     "Decision",
     "Document",
+    "DocumentIndexRequest",
     "DocumentStatus",
     "Evidence",
     "MessageRole",

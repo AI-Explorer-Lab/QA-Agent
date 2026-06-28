@@ -2,6 +2,13 @@ app:
   name: Trusted-Question-Answering-Agent
   env: dev
   timezone: Asia/Singapore
+environment:
+  name: dev
+database:
+  bootstrap_on_startup: false
+db:
+  backend: pgvector
+  async_session: true
 llm:
   provider: deepseek
   current_model: deepseek-deepseek-v4-flash
@@ -81,7 +88,7 @@ embedding:
 storage:
   backend: pgvector
   pgvector:
-    database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
+    database_url: postgresql+asyncpg://postgres:1234@127.0.0.1:5432/trusted_qa
     embedding_dim: 1024
   local_dev:
     enabled: false
@@ -165,5 +172,5 @@ api_keys:
   mineru_api_key_env: MinerU_API_KEY
 vector:
   backend: pgvector
-  pgvector_database_url: postgresql+psycopg2://postgres:1234@127.0.0.1:5432/trusted_qa
+  pgvector_database_url: postgresql+asyncpg://postgres:1234@127.0.0.1:5432/trusted_qa
   pgvector_embedding_dim: 1024

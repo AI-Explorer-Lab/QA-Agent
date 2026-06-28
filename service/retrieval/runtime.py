@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any, Iterable, Mapping
 
@@ -7,7 +8,8 @@ from database.connection import get_local_dev_database_url, get_pgvector_databas
 from service.retrieval.pgvector_repository import PgvectorRepository
 from utils.config_loader import get_app_config
 
-_LOCK = threading.Lock()
+_RESET_LOCK = threading.Lock()
+_WRITE_LOCK = asyncio.Lock()
 
 
 def _configured_embedding_dim(config: Mapping[str, Any]) -> int:
@@ -41,17 +43,17 @@ def get_runtime_repository() -> PgvectorRepository:
 
 def reset_runtime_repository() -> None:
     global _RUNTIME_REPOSITORY
-    with _LOCK:
+    with _RESET_LOCK:
         _RUNTIME_REPOSITORY = _build_runtime_repository()
 
 
-def replace_collection_chunks(collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
+async def replace_collection_chunks(collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
     rows = [dict(item) for item in chunks]
-    with _LOCK:
-        return _RUNTIME_REPOSITORY.replace_collection_chunks(collection_name, rows)
+    async with _WRITE_LOCK:
+        return await _RUNTIME_REPOSITORY.replace_collection_chunks(collection_name, rows)
 
 
-def upsert_runtime_chunks(chunks: Iterable[Mapping[str, Any]]) -> int:
+async def upsert_runtime_chunks(chunks: Iterable[Mapping[str, Any]]) -> int:
     rows = [dict(item) for item in chunks]
-    with _LOCK:
-        return _RUNTIME_REPOSITORY.upsert_chunks(rows)
+    async with _WRITE_LOCK:
+        return await _RUNTIME_REPOSITORY.upsert_chunks(rows)

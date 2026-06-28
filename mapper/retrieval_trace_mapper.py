@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from database import get_sqlalchemy_engine, get_storage_backend
+from database import get_async_session, get_storage_backend
 from domain import RetrievalTrace
 from mapper.local_dev_repository import LocalDevRepository
 
@@ -24,9 +25,9 @@ class RetrievalTraceMapper:
 
         if self.backend == "local_dev":
             self.local_repository = local_repository or LocalDevRepository(database_url)
-            self.engine = None
+            self.database_url = database_url
         else:
-            self.engine = get_sqlalchemy_engine(backend="pgvector", database_url=database_url)
+            self.database_url = database_url
 
     @staticmethod
     def _now_utc() -> datetime:
@@ -36,10 +37,10 @@ class RetrievalTraceMapper:
     def _to_json(data: object) -> str:
         return json.dumps(data, ensure_ascii=True, default=str)
 
-    def save_trace(self, trace: RetrievalTrace) -> None:
+    async def save_trace(self, trace: RetrievalTrace) -> None:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            self.local_repository.save_retrieval_trace(trace)
+            await asyncio.to_thread(self.local_repository.save_retrieval_trace, trace)
             return
 
         payload = trace.model_dump(mode="json")
@@ -88,8 +89,8 @@ class RetrievalTraceMapper:
             """
         )
 
-        with self.engine.begin() as connection:
-            connection.execute(
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            await session.execute(
                 statement,
                 {
                     "trace_id": payload["trace_id"],
@@ -104,11 +105,12 @@ class RetrievalTraceMapper:
                     "created_at": payload.get("created_at") or self._now_utc(),
                 },
             )
+            await session.commit()
 
-    def list_session_traces(self, session_id: str, limit: int = 100) -> list[RetrievalTrace]:
+    async def list_session_traces(self, session_id: str, limit: int = 100) -> list[RetrievalTrace]:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            return self.local_repository.list_retrieval_traces(session_id=session_id, limit=limit)
+            return await asyncio.to_thread(self.local_repository.list_retrieval_traces, session_id, limit)
 
         query = text(
             """
@@ -130,10 +132,12 @@ class RetrievalTraceMapper:
             """
         )
 
-        with self.engine.begin() as connection:
-            rows = connection.execute(
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            rows = (
+                await session.execute(
                 query,
                 {"session_id": session_id, "limit": max(1, int(limit))},
+                )
             ).mappings().all()
 
         traces: list[RetrievalTrace] = []

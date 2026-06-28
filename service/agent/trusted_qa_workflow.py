@@ -212,7 +212,7 @@ class TrustedQAWorkflow:
 
         cached_stage1 = None
         if enable_cache:
-            cached_stage1 = self.retriever.get_cached_stage1(
+            cached_stage1 = await self.retriever.get_cached_stage1(
                 question=question,
                 collection_name=collection_name,
                 top_k=effective_top_k,
@@ -360,7 +360,7 @@ class TrustedQAWorkflow:
 
     async def _graph_load_session(self, state: Dict[str, Any]) -> Dict[str, Any]:
         started_at = time.perf_counter()
-        session = self.session_service.load_session(state.get("session_id"), collection_name=str(state.get("collection_name") or "default"))
+        session = await self.session_service.load_session(state.get("session_id"), collection_name=str(state.get("collection_name") or "default"))
         sid = session["session_id"]
         observations = list(state.get("observations") or [])
         observations.append({"phase": "load_session", "session_id": sid, "duration_ms": _duration_ms(started_at)})
@@ -656,8 +656,8 @@ class TrustedQAWorkflow:
             turn_route=state.get("turn_route") or {},
             workflow_duration_ms=_duration_ms(float(workflow_started_at)) if isinstance(workflow_started_at, (int, float)) else None,
         )
-        self._save(str(state.get("sid") or ""), str(state.get("original_question") or state.get("question") or ""), response)
-        self._update_conversation_focus(
+        await self._save(str(state.get("sid") or ""), str(state.get("original_question") or state.get("question") or ""), response)
+        await self._update_conversation_focus(
             session_id=str(state.get("sid") or ""),
             effective_question=str(state.get("effective_question") or state.get("question") or ""),
             query_type=str(response.get("query_type") or state.get("query_type") or "fact_lookup"),
@@ -729,7 +729,7 @@ class TrustedQAWorkflow:
     ) -> Dict[str, Any]:
         workflow_started_at = time.perf_counter()
         load_session_started_at = time.perf_counter()
-        session = self.session_service.load_session(session_id, collection_name=collection_name)
+        session = await self.session_service.load_session(session_id, collection_name=collection_name)
         sid = session["session_id"]
         load_session_duration_ms = _duration_ms(load_session_started_at)
         context_started_at = time.perf_counter()
@@ -805,8 +805,8 @@ class TrustedQAWorkflow:
                 turn_route=turn_route,
                 workflow_duration_ms=_duration_ms(workflow_started_at),
             )
-            self._save(sid, original_question, response)
-            self._update_conversation_focus(
+            await self._save(sid, original_question, response)
+            await self._update_conversation_focus(
                 session_id=sid,
                 effective_question=effective_question,
                 query_type=query_type,
@@ -929,8 +929,8 @@ class TrustedQAWorkflow:
             turn_route=turn_route,
             workflow_duration_ms=_duration_ms(workflow_started_at),
         )
-        self._save(sid, original_question, response)
-        self._update_conversation_focus(
+        await self._save(sid, original_question, response)
+        await self._update_conversation_focus(
             session_id=sid,
             effective_question=effective_question,
             query_type=query_type,
@@ -1110,7 +1110,7 @@ class TrustedQAWorkflow:
             "session_id": session_id,
         }
 
-    def _update_conversation_focus(
+    async def _update_conversation_focus(
         self,
         session_id: str,
         effective_question: str,
@@ -1134,10 +1134,12 @@ class TrustedQAWorkflow:
         )
         if next_focus is None:
             return
-        updater(session_id, {"conversation_focus": next_focus})
+        result = updater(session_id, {"conversation_focus": next_focus})
+        if hasattr(result, "__await__"):
+            await result
 
-    def _save(self, session_id: str, question: str, response: Dict[str, Any]) -> None:
-        self.session_service.save_session(session_id=session_id, user_question=question, assistant_payload=response, retrieval_trace=response.get("retrieval_trace") or {})
+    async def _save(self, session_id: str, question: str, response: Dict[str, Any]) -> None:
+        await self.session_service.save_session(session_id=session_id, user_question=question, assistant_payload=response, retrieval_trace=response.get("retrieval_trace") or {})
 
 
 _DEFAULT_WORKFLOW = TrustedQAWorkflow()

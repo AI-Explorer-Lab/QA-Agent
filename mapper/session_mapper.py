@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from database import get_sqlalchemy_engine, get_storage_backend
+from database import get_async_session, get_storage_backend
 from domain import QAMessage, QASession
 from mapper.local_dev_repository import LocalDevRepository
 
@@ -24,9 +25,9 @@ class SessionMapper:
 
         if self.backend == "local_dev":
             self.local_repository = local_repository or LocalDevRepository(database_url)
-            self.engine = None
+            self.database_url = database_url
         else:
-            self.engine = get_sqlalchemy_engine(backend="pgvector", database_url=database_url)
+            self.database_url = database_url
 
     @staticmethod
     def _now_utc() -> datetime:
@@ -36,10 +37,10 @@ class SessionMapper:
     def _to_json(data: object) -> str:
         return json.dumps(data, ensure_ascii=True, default=str)
 
-    def save_session(self, session: QASession) -> None:
+    async def save_session(self, session: QASession) -> None:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            self.local_repository.save_session(session)
+            await asyncio.to_thread(self.local_repository.save_session, session)
             return
 
         payload = session.model_dump(mode="json")
@@ -69,8 +70,8 @@ class SessionMapper:
         )
 
         now_utc = self._now_utc()
-        with self.engine.begin() as connection:
-            connection.execute(
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as db_session:
+            await db_session.execute(
                 statement,
                 {
                     "session_id": payload["session_id"],
@@ -81,11 +82,12 @@ class SessionMapper:
                     "updated_at": payload.get("updated_at") or now_utc,
                 },
             )
+            await db_session.commit()
 
-    def get_session(self, session_id: str) -> QASession | None:
+    async def get_session(self, session_id: str) -> QASession | None:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            return self.local_repository.get_session(session_id)
+            return await asyncio.to_thread(self.local_repository.get_session, session_id)
 
         query = text(
             """
@@ -102,8 +104,8 @@ class SessionMapper:
             """
         )
 
-        with self.engine.begin() as connection:
-            row = connection.execute(query, {"session_id": session_id}).mappings().first()
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as db_session:
+            row = (await db_session.execute(query, {"session_id": session_id})).mappings().first()
 
         if row is None:
             return None
@@ -117,10 +119,10 @@ class SessionMapper:
             updated_at=row["updated_at"],
         )
 
-    def save_message(self, message: QAMessage) -> None:
+    async def save_message(self, message: QAMessage) -> None:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            self.local_repository.save_message(message)
+            await asyncio.to_thread(self.local_repository.save_message, message)
             return
 
         payload = message.model_dump(mode="json")
@@ -171,8 +173,8 @@ class SessionMapper:
             """
         )
 
-        with self.engine.begin() as connection:
-            connection.execute(
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as db_session:
+            await db_session.execute(
                 statement,
                 {
                     "message_id": payload["message_id"],
@@ -190,11 +192,12 @@ class SessionMapper:
                     "created_at": payload.get("created_at") or self._now_utc(),
                 },
             )
+            await db_session.commit()
 
-    def list_messages(self, session_id: str, limit: int = 1000) -> list[QAMessage]:
+    async def list_messages(self, session_id: str, limit: int = 1000) -> list[QAMessage]:
         if self.backend == "local_dev":
             assert self.local_repository is not None
-            return self.local_repository.list_messages(session_id=session_id, limit=limit)
+            return await asyncio.to_thread(self.local_repository.list_messages, session_id, limit)
 
         query = text(
             """
@@ -219,10 +222,12 @@ class SessionMapper:
             """
         )
 
-        with self.engine.begin() as connection:
-            rows = connection.execute(
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as db_session:
+            rows = (
+                await db_session.execute(
                 query,
                 {"session_id": session_id, "limit": max(1, int(limit))},
+                )
             ).mappings().all()
 
         return [

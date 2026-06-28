@@ -238,7 +238,7 @@ class RetrievalEngine:
             if value and value not in queries:
                 queries.append(value)
 
-        chunks = self._prepare_chunks(session_service.get_collection_chunks(collection_name))
+        chunks = self._prepare_chunks(await session_service.get_collection_chunks(collection_name))
         if not chunks:
             return {
                 "backend": "local_dev_fallback",

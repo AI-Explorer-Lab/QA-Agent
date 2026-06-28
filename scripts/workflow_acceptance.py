@@ -17,7 +17,7 @@ from service.retrieval.runtime import replace_collection_chunks
 
 
 async def main() -> None:
-    replace_collection_chunks(
+    await replace_collection_chunks(
         "acceptance",
         [
             {

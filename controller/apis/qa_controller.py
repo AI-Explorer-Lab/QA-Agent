@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -10,7 +10,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from domain.qa import QARequest
-from exception import CollectionNotFoundException, ValidationException
+from exceptions import CollectionNotFoundException, ValidationException
 from service.agent.trusted_qa_workflow import get_trusted_qa_workflow
 from service.retrieval.runtime import get_runtime_repository
 
@@ -72,11 +72,11 @@ def _sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def _validate_qa_request(request: QARequest) -> str:
+async def _validate_qa_request(request: QARequest) -> str:
     collection_name = str(request.collection_name or "").strip()
     if not collection_name:
         raise ValidationException("collection_name is required", detail={"collection_name": request.collection_name})
-    if get_runtime_repository().count_collection_chunks(collection_name) <= 0:
+    if await get_runtime_repository().count_collection_chunks(collection_name) <= 0:
         raise CollectionNotFoundException(collection_name)
     return collection_name
 
@@ -94,7 +94,7 @@ async def _run_qa(request: QARequest, collection_name: str) -> dict[str, Any]:
 
 @router.post("/qa/ask")
 async def ask(request: QARequest):
-    collection_name = _validate_qa_request(request)
+    collection_name = await _validate_qa_request(request)
     response = await _run_qa(request, collection_name)
     if request.include_debug:
         return response
@@ -103,7 +103,7 @@ async def ask(request: QARequest):
 
 @router.post("/qa/ask/stream")
 async def ask_stream(request: QARequest):
-    collection_name = _validate_qa_request(request)
+    collection_name = await _validate_qa_request(request)
 
     async def event_stream():
         started_at = time.perf_counter()
@@ -128,7 +128,7 @@ async def ask_stream(request: QARequest):
             ("select_skill_from_registry", "正在选择问答技能"),
             ("clarify_gate", "正在检查是否需要澄清"),
             ("parallel_hybrid_retrieval", "正在检索候选证据"),
-            ("evidence_decision", "正在核验证据质量"),
+            ("evidence_decision", "正在校验证据质量"),
             ("answer_generation", "正在生成可核查答案"),
         ]
         stage_index = 0
@@ -184,3 +184,4 @@ async def ask_stream(request: QARequest):
             "X-Accel-Buffering": "no",
         },
     )
+

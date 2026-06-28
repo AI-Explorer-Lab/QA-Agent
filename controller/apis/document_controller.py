@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import shutil
@@ -9,9 +9,10 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from exception.business_exception import ValidationException
+from domain.req import DocumentIndexRequest
+from exceptions.business_exception import ValidationException
 from service.pdf.document_indexer import get_document_indexing_service
 from service.pdf.index_progress import EVENT_TO_STEP, get_index_progress_tracker
 
@@ -19,13 +20,6 @@ router = APIRouter()
 _PATH_FIELD_PATTERN = re.compile(
     r'(?P<prefix>"(?P<key>pdf_path|doc_source)"\s*:\s*")(?P<value>[^"]*)(?P<suffix>")'
 )
-
-
-class DocumentIndexRequest(BaseModel):
-    doc_source: str = ""
-    pdf_path: str
-    force_rebuild: bool = False
-    collection_name: str = "default"
 
 
 def _step_label(key: str) -> str:
@@ -375,3 +369,4 @@ async def get_document_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail={"task_id": task_id, "message": "Document task not found"})
     return task
+

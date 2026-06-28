@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -9,11 +10,10 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 from .sparse_retriever import SparseBM25Retriever, coarse_tokenize
 
 
-try:  # pragma: no cover - optional runtime dependency for real pgvector mode.
-    from sqlalchemy import create_engine, text
-except Exception:  # pragma: no cover
-    create_engine = None
-    text = None
+from sqlalchemy import text
+
+from database import get_async_session
+from database.init_db import init_pgvector_schema
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -131,14 +131,14 @@ class PgvectorRepository:
         self.revision = 0
 
         if local_chunks:
-            self.upsert_chunks(local_chunks)
+            self._upsert_chunks_local([self._prepare_chunk(source) for source in local_chunks])
 
-    def upsert_chunks(self, chunks: Iterable[Mapping[str, Any]]) -> int:
+    async def upsert_chunks(self, chunks: Iterable[Mapping[str, Any]]) -> int:
         prepared = [self._prepare_chunk(source) for source in chunks]
         if not prepared:
             return 0
         if self.backend == "pgvector":
-            count = self._upsert_chunks_pgvector(prepared)
+            count = await self._upsert_chunks_pgvector(prepared)
         elif self.backend == "local_dev":
             count = self._upsert_chunks_local(prepared)
         else:
@@ -147,14 +147,14 @@ class PgvectorRepository:
             self.revision += 1
         return count
 
-    def get_latest_document_by_source(self, collection_name: str, doc_source: str) -> Dict[str, Any] | None:
+    async def get_latest_document_by_source(self, collection_name: str, doc_source: str) -> Dict[str, Any] | None:
         collection = _clean_text(collection_name)
         source = _clean_text(doc_source)
         if not collection or not source:
             return None
 
         if self.backend == "pgvector":
-            engine = self._engine_instance()
+            await self._ensure_schema_ready()
             sql = text(
                 """
                 SELECT
@@ -175,10 +175,12 @@ class PgvectorRepository:
                 LIMIT 1
                 """
             )
-            with engine.begin() as connection:
-                record = connection.execute(
+            async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+                record = (
+                    await session.execute(
                     sql,
                     {"collection_name": collection, "doc_source": source},
+                    )
                 ).mappings().first()
             if record is None:
                 return None
@@ -212,22 +214,23 @@ class PgvectorRepository:
             }
         return None
 
-    def delete_documents_by_source(self, collection_name: str, doc_source: str) -> int:
+    async def delete_documents_by_source(self, collection_name: str, doc_source: str) -> int:
         collection = _clean_text(collection_name)
         source = _clean_text(doc_source)
         if not collection or not source:
             return 0
 
         if self.backend == "pgvector":
-            engine = self._engine_instance()
+            await self._ensure_schema_ready()
             sql = text(
                 "DELETE FROM pdf_documents WHERE collection_name = :collection_name AND doc_source = :doc_source"
             )
-            with engine.begin() as connection:
-                result = connection.execute(
+            async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+                result = await session.execute(
                     sql,
                     {"collection_name": collection, "doc_source": source},
                 )
+                await session.commit()
                 return int(getattr(result, "rowcount", 0) or 0)
 
         if self.backend == "local_dev":
@@ -245,13 +248,13 @@ class PgvectorRepository:
 
         raise RuntimeError(f"Unsupported repository backend: {self.backend}")
 
-    def replace_collection_chunks(self, collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
+    async def replace_collection_chunks(self, collection_name: str, chunks: Iterable[Mapping[str, Any]]) -> int:
         collection = _clean_text(collection_name) or "default"
         prepared = [self._prepare_chunk(source) for source in chunks]
         for row in prepared:
             row["collection_name"] = collection
         if self.backend == "pgvector":
-            count = self._replace_collection_pgvector(collection, prepared)
+            count = await self._replace_collection_pgvector(collection, prepared)
         elif self.backend == "local_dev":
             self._delete_collection_local(collection)
             count = self._upsert_chunks_local(prepared)
@@ -260,12 +263,12 @@ class PgvectorRepository:
         self.revision += 1
         return count
 
-    def delete_collection(self, collection_name: str) -> int:
+    async def delete_collection(self, collection_name: str) -> int:
         collection = _clean_text(collection_name)
         if not collection:
             raise ValueError("collection_name is required when deleting indexed chunks.")
         if self.backend == "pgvector":
-            count = self._delete_collection_pgvector(collection)
+            count = await self._delete_collection_pgvector(collection)
         elif self.backend == "local_dev":
             count = self._delete_collection_local(collection)
         else:
@@ -278,17 +281,17 @@ class PgvectorRepository:
         self._sparse_retriever.index_chunks([])
         self.revision += 1
 
-    def count_collection_chunks(self, collection_name: str = "") -> int:
+    async def count_collection_chunks(self, collection_name: str = "") -> int:
         collection = _clean_text(collection_name)
         if self.backend == "pgvector":
-            engine = self._engine_instance()
+            await self._ensure_schema_ready()
             sql = "SELECT COUNT(*) FROM pdf_chunks"
             params: Dict[str, Any] = {}
             if collection:
                 sql += " WHERE collection_name = :collection_name"
                 params["collection_name"] = collection
-            with engine.begin() as connection:
-                return int(connection.execute(text(sql), params).scalar() or 0)
+            async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+                return int((await session.execute(text(sql), params)).scalar() or 0)
         if not collection:
             return len(self._local_chunks)
         return len([row for row in self._local_chunks if str(row.get("collection_name") or "") == collection])
@@ -302,7 +305,7 @@ class PgvectorRepository:
             if str(item.get("collection_name") or "") == collection_name
         ]
 
-    def dense_search(
+    async def dense_search(
         self,
         collection_name: str,
         query_embedding: Sequence[float] | None,
@@ -311,7 +314,7 @@ class PgvectorRepository:
         chunk_type: str | None = None,
     ) -> list[Dict[str, Any]]:
         if self.backend == "pgvector":
-            return self._dense_search_pgvector(
+            return await self._dense_search_pgvector(
                 collection_name=collection_name,
                 query_embedding=query_embedding,
                 top_k=top_k,
@@ -341,7 +344,7 @@ class PgvectorRepository:
         rows.sort(key=lambda item: float(item.get("dense_score") or 0.0), reverse=True)
         return rows[: max(1, int(top_k))]
 
-    def keyword_search(
+    async def keyword_search(
         self,
         collection_name: str,
         query_text: str,
@@ -352,7 +355,7 @@ class PgvectorRepository:
         effective_chunk_type = "table" if table_only else chunk_type
 
         if self.backend == "pgvector":
-            return self._keyword_search_pgvector(
+            return await self._keyword_search_pgvector(
                 collection_name=collection_name,
                 query_text=query_text,
                 top_k=top_k,
@@ -379,7 +382,7 @@ class PgvectorRepository:
             row.setdefault("score", float(row.get("bm25_score") or 0.0))
         return result
 
-    def keyword_search_many(
+    async def keyword_search_many(
         self,
         collection_name: str,
         query_texts: Sequence[str],
@@ -393,7 +396,7 @@ class PgvectorRepository:
             return {}
 
         if self.backend == "pgvector":
-            candidates = self._keyword_candidates_pgvector(
+            candidates = await self._keyword_candidates_pgvector(
                 collection_name=collection_name,
                 top_k=top_k,
                 chunk_type=effective_chunk_type,
@@ -419,8 +422,8 @@ class PgvectorRepository:
             for query in queries
         }
 
-    def table_search(self, collection_name: str, query_text: str, top_k: int) -> list[Dict[str, Any]]:
-        return self.keyword_search(
+    async def table_search(self, collection_name: str, query_text: str, top_k: int) -> list[Dict[str, Any]]:
+        return await self.keyword_search(
             collection_name=collection_name,
             query_text=query_text,
             top_k=top_k,
@@ -510,24 +513,17 @@ class PgvectorRepository:
         self._sparse_retriever.index_chunks(self._local_chunks)
         return before - len(self._local_chunks)
 
-    def _engine_instance(self):
+    async def _ensure_schema_ready(self) -> None:
         if self.backend != "pgvector":
-            raise RuntimeError("PG engine requested for a non-pgvector repository.")
+            raise RuntimeError("PG session requested for a non-pgvector repository.")
         if not self.database_url:
             raise RuntimeError("PGVECTOR_DATABASE_URL is empty. Configure storage.pgvector.database_url in config/app.yaml.")
-        if create_engine is None or text is None:
-            raise RuntimeError("SQLAlchemy is unavailable. Install sqlalchemy and psycopg2-binary.")
         if not self._schema_ready:
-            from database.init_db import init_pgvector_schema
-
-            init_pgvector_schema(database_url=self.database_url)
+            await init_pgvector_schema(database_url=self.database_url)
             self._schema_ready = True
-        if self._engine is None:
-            self._engine = create_engine(self.database_url, pool_pre_ping=True)
-        return self._engine
 
-    def _upsert_chunks_pgvector(self, chunks: Sequence[Mapping[str, Any]]) -> int:
-        engine = self._engine_instance()
+    async def _upsert_chunks_pgvector(self, chunks: Sequence[Mapping[str, Any]]) -> int:
+        await self._ensure_schema_ready()
         doc_sql = text("""
             INSERT INTO pdf_documents (doc_id, collection_name, doc_source, title, doc_hash, page_count, metadata_json, indexed_at, created_at, updated_at)
             VALUES (:doc_id, :collection_name, :doc_source, :title, :doc_hash, :page_count, CAST(:metadata_json AS jsonb), NOW(), NOW(), NOW())
@@ -597,30 +593,33 @@ class PgvectorRepository:
             row["metadata_json"] = _json_dumps(row.get("metadata_json") or {})
             row["embedding"] = _vector_literal(row.get("embedding") or [], self.embedding_dim)
             chunk_rows.append(row)
-        with engine.begin() as connection:
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
             for doc in docs.values():
-                connection.execute(doc_sql, doc)
+                await session.execute(doc_sql, doc)
             for row in chunk_rows:
-                connection.execute(chunk_sql, row)
+                await session.execute(chunk_sql, row)
+            await session.commit()
         return len(chunk_rows)
 
-    def _replace_collection_pgvector(self, collection_name: str, chunks: Sequence[Mapping[str, Any]]) -> int:
-        engine = self._engine_instance()
-        with engine.begin() as connection:
-            connection.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
-            connection.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+    async def _replace_collection_pgvector(self, collection_name: str, chunks: Sequence[Mapping[str, Any]]) -> int:
+        await self._ensure_schema_ready()
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            await session.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            await session.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            await session.commit()
         if not chunks:
             return 0
-        return self._upsert_chunks_pgvector(chunks)
+        return await self._upsert_chunks_pgvector(chunks)
 
-    def _delete_collection_pgvector(self, collection_name: str) -> int:
-        engine = self._engine_instance()
-        with engine.begin() as connection:
-            result = connection.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
-            connection.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+    async def _delete_collection_pgvector(self, collection_name: str) -> int:
+        await self._ensure_schema_ready()
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            result = await session.execute(text("DELETE FROM pdf_chunks WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            await session.execute(text("DELETE FROM pdf_documents WHERE collection_name = :collection_name"), {"collection_name": collection_name})
+            await session.commit()
         return int(result.rowcount or 0)
 
-    def _dense_search_pgvector(
+    async def _dense_search_pgvector(
         self,
         collection_name: str,
         query_embedding: Sequence[float] | None,
@@ -632,7 +631,7 @@ class PgvectorRepository:
             query_embedding = deterministic_embedding(query_text, self.embedding_dim)
 
         vector_literal = _vector_literal(query_embedding, self.embedding_dim)
-        self._engine_instance()
+        await self._ensure_schema_ready()
 
         sql = text(
             """
@@ -653,15 +652,17 @@ class PgvectorRepository:
         )
 
         rows: list[Dict[str, Any]] = []
-        with self._engine.begin() as connection:
-            records = connection.execute(
-                sql,
-                {
-                    "query_vector": vector_literal,
-                    "collection_name": collection_name,
-                    "chunk_type": chunk_type or "",
-                    "top_k": max(1, int(top_k)),
-                },
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            records = (
+                await session.execute(
+                    sql,
+                    {
+                        "query_vector": vector_literal,
+                        "collection_name": collection_name,
+                        "chunk_type": chunk_type or "",
+                        "top_k": max(1, int(top_k)),
+                    },
+                )
             ).mappings()
 
             for record in records:
@@ -695,19 +696,19 @@ class PgvectorRepository:
                 rows.append(payload)
         return rows
 
-    def _keyword_search_pgvector(
+    async def _keyword_search_pgvector(
         self,
         collection_name: str,
         query_text: str,
         top_k: int,
         chunk_type: str | None,
     ) -> list[Dict[str, Any]]:
-        self._engine_instance()
+        await self._ensure_schema_ready()
 
         if not coarse_tokenize(query_text):
             return []
 
-        candidates = self._keyword_candidates_pgvector(
+        candidates = await self._keyword_candidates_pgvector(
             collection_name=collection_name,
             top_k=top_k,
             chunk_type=chunk_type,
@@ -722,13 +723,13 @@ class PgvectorRepository:
             chunk_type=chunk_type,
         )
 
-    def _keyword_candidates_pgvector(
+    async def _keyword_candidates_pgvector(
         self,
         collection_name: str,
         top_k: int,
         chunk_type: str | None,
     ) -> list[Dict[str, Any]]:
-        self._engine_instance()
+        await self._ensure_schema_ready()
 
         sql = text(
             """
@@ -751,14 +752,16 @@ class PgvectorRepository:
 
         scan_limit = max(200, int(top_k) * 40)
         candidates: list[Dict[str, Any]] = []
-        with self._engine.begin() as connection:
-            records = connection.execute(
-                sql,
-                {
-                    "collection_name": collection_name,
-                    "chunk_type": chunk_type or "",
-                    "scan_limit": scan_limit,
-                },
+        async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
+            records = (
+                await session.execute(
+                    sql,
+                    {
+                        "collection_name": collection_name,
+                        "chunk_type": chunk_type or "",
+                        "scan_limit": scan_limit,
+                    },
+                )
             ).mappings()
 
             for record in records:
@@ -792,5 +795,7 @@ class PgvectorRepository:
                 })
 
         return candidates
+
+
 
 

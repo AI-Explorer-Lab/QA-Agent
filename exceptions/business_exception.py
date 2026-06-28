@@ -10,7 +10,7 @@ from constant import (
     SESSION_NOT_FOUND,
     VALIDATION_ERROR,
 )
-from exception.base_exception import AppBaseException
+from exceptions.base_exception import AppBaseException
 
 
 class ValidationException(AppBaseException):
@@ -56,3 +56,4 @@ class RetrievalException(AppBaseException):
 class LowEvidenceException(AppBaseException):
     def __init__(self, message: str, detail: dict | None = None) -> None:
         super().__init__(message=message, code=LOW_EVIDENCE, status_code=422, detail=detail or {})
+

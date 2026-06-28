@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
 import inspect
 import os
+
+from fastapi import FastAPI
 
 
 def _patch_httpx_testclient_compat() -> None:
@@ -32,19 +34,15 @@ from core.config_loader import load_runtime_env
 load_runtime_env()
 
 from controller.apis import router
-from middlewares.exception_handler import app_exception_handler
+from database import bootstrap_database, dispose_async_engines
+from exceptions.exception_handler import app_exception_handler
 from middlewares.operation_log import log_operation_event
 from middlewares.request_log import RequestLogMiddleware
 from utils.config_loader import get_app_config
 
 config = get_app_config()
-app = FastAPI(title=config.get("app", {}).get("name", "trusted-pdf-qa"))
-app.add_middleware(RequestLogMiddleware)
-app.add_exception_handler(Exception, app_exception_handler)
-app.include_router(router)
 
 
-@app.on_event("startup")
 async def preload_runtime_models() -> None:
     reranker_cfg = config.get("reranker", {}) if isinstance(config.get("reranker"), dict) else {}
     if not bool(reranker_cfg.get("cross_encoder_preload_on_startup", False)):
@@ -79,11 +77,33 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _bootstrap_db_enabled() -> bool:
+    database_cfg = config.get("database", {}) if isinstance(config.get("database"), dict) else {}
+    return _env_bool("TRUSTED_QA_BOOTSTRAP_DB", bool(database_cfg.get("bootstrap_on_startup", False)))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    del app
+    if _bootstrap_db_enabled():
+        await bootstrap_database()
+    await preload_runtime_models()
+    try:
+        yield
+    finally:
+        await dispose_async_engines()
+
+
+app = FastAPI(title=config.get("app", {}).get("name", "trusted-pdf-qa"), lifespan=lifespan)
+app.add_middleware(RequestLogMiddleware)
+app.add_exception_handler(Exception, app_exception_handler)
+app.include_router(router)
+
+
 def _dev_reload_enabled() -> bool:
     app_cfg = config.get("app", {}) if isinstance(config.get("app"), dict) else {}
     default_enabled = str(app_cfg.get("env", "dev")).strip().lower() in {"dev", "local", "development"}
     return _env_bool("TRUSTED_QA_RELOAD", default_enabled)
-
 
 
 if __name__ == "__main__":

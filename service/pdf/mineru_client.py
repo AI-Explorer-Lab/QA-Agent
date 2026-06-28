@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
     fitz = None
 
 try:  # pragma: no cover - optional integration point
-    from exception.business_exception import BusinessException as _BusinessException
+    from exceptions.base_exception import AppBaseException as _BusinessException
 except Exception:  # pragma: no cover
     class _BusinessException(RuntimeError):
         pass
@@ -866,3 +866,5 @@ def parse_pdf_to_mineru_json(
         use_cache=use_cache,
         force_rebuild=force_rebuild,
     )
+
+

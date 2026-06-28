@@ -4,7 +4,7 @@ from pathlib import Path
 import logging
 from typing import Any, Callable, Dict, List
 
-from exception.business_exception import ValidationException
+from exceptions.business_exception import ValidationException
 from middlewares.operation_log import (
     fail_operation_step,
     finish_operation_step,
@@ -173,7 +173,7 @@ class DocumentIndexingService:
                 )
                 try:
                     if not force_rebuild:
-                        existing = runtime_repository.get_latest_document_by_source(collection, doc_source_value)
+                        existing = await runtime_repository.get_latest_document_by_source(collection, doc_source_value)
                         existing_hash = str((existing or {}).get("doc_hash") or "")
                         if existing and existing_hash and existing_hash == pdf_doc.file_hash:
                             skipped_detail = {
@@ -435,7 +435,7 @@ class DocumentIndexingService:
                             "effective_vector_backend": str(getattr(runtime_repository, "backend", "unknown") or "unknown"),
                             "target": str(getattr(runtime_repository, "backend", "unknown") or "unknown"),
                             "persistent_database_write": False,
-                            "session_collection_chunks": len(self.session_service.get_collection_chunks(collection)),
+                            "session_collection_chunks": len(await self.session_service.get_collection_chunks(collection)),
                         },
                     }
 
@@ -469,17 +469,17 @@ class DocumentIndexingService:
             )
             try:
                 if force_rebuild:
-                    indexed_count = replace_collection_chunks(collection, all_chunks)
+                    indexed_count = await replace_collection_chunks(collection, all_chunks)
                 else:
                     if doc_sources_to_replace:
                         for source in sorted(doc_sources_to_replace):
-                            runtime_repository.delete_documents_by_source(collection, source)
+                            await runtime_repository.delete_documents_by_source(collection, source)
                             try:
-                                self.session_service.delete_collection_doc_source(collection, source)
+                                await self.session_service.delete_collection_doc_source(collection, source)
                             except Exception:
                                 pass
-                    indexed_count = upsert_runtime_chunks(all_chunks)
-                session_result = self.session_service.upsert_collection_chunks(
+                    indexed_count = await upsert_runtime_chunks(all_chunks)
+                session_result = await self.session_service.upsert_collection_chunks(
                     collection,
                     all_chunks,
                     force_rebuild=force_rebuild,
@@ -539,6 +539,7 @@ _DEFAULT_INDEXING_SERVICE = DocumentIndexingService()
 
 def get_document_indexing_service() -> DocumentIndexingService:
     return _DEFAULT_INDEXING_SERVICE
+
 
 
 

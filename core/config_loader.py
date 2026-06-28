@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 import yaml
 from dotenv import load_dotenv
 
+try:
+    from config.config import load_app_config
+except Exception:  # pragma: no cover - bootstrap fallback
+    load_app_config = None  # type: ignore[assignment]
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.yaml"
 DEFAULT_PROVIDER_KEY_ENV = {
@@ -80,6 +85,9 @@ def _normalize_openai_base_url(base_url: str) -> str:
 
 
 def _read_yaml(path: Path) -> Dict[str, Any]:
+    if load_app_config is not None:
+        loaded_config = load_app_config(path)
+        return loaded_config if isinstance(loaded_config, dict) else {}
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as file:

@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from sqlalchemy import text
 
-from database.connection import get_sqlalchemy_engine
+from database.connection import get_async_session
 
 
 def _utc_now_iso() -> str:
@@ -39,13 +39,13 @@ class SessionService:
     """PostgreSQL-backed session, message, retrieval trace, and evaluation store."""
 
     def __init__(self) -> None:
-        self.engine = get_sqlalchemy_engine(backend="pgvector")
+        self.backend = "pgvector"
 
-    def load_session(self, session_id: str | None = None, collection_name: str = "default") -> Dict[str, Any]:
+    async def load_session(self, session_id: str | None = None, collection_name: str = "default") -> Dict[str, Any]:
         sid = _clean_str(session_id) or str(uuid.uuid4())
         cname = _clean_str(collection_name) or "default"
-        self._ensure_session(sid, cname)
-        session = self.get_session(sid)
+        await self._ensure_session(sid, cname)
+        session = await self.get_session(sid)
         if session is None:
             return {
                 "session_id": sid,
@@ -56,7 +56,7 @@ class SessionService:
             }
         return session
 
-    def save_session(
+    async def save_session(
         self,
         session_id: str,
         user_question: str,
@@ -66,7 +66,7 @@ class SessionService:
         sid = _clean_str(session_id) or str(uuid.uuid4())
         trace = dict(retrieval_trace or {})
         cname = _clean_str(trace.get("collection_name") or assistant_payload.get("collection_name")) or "default"
-        self._ensure_session(sid, cname)
+        await self._ensure_session(sid, cname)
 
         user_message_id = str(uuid.uuid4())
         assistant_message_id = str(uuid.uuid4())
@@ -74,8 +74,8 @@ class SessionService:
         evaluation = dict(trace.get("evaluation") or assistant_payload.get("evaluation") or {})
         timestamp = _utc_now_iso()
 
-        with self.engine.begin() as connection:
-            connection.execute(
+        async with get_async_session(backend=self.backend) as session:
+            await session.execute(
                 text(
                     """
                     INSERT INTO qa_messages (
@@ -95,7 +95,7 @@ class SessionService:
                     "question": user_question,
                 },
             )
-            connection.execute(
+            await session.execute(
                 text(
                     """
                     INSERT INTO qa_messages (
@@ -140,7 +140,7 @@ class SessionService:
                 },
             )
             if trace:
-                connection.execute(
+                await session.execute(
                     text(
                         """
                         INSERT INTO retrieval_traces (
@@ -176,7 +176,7 @@ class SessionService:
                     },
                 )
             if evaluation:
-                connection.execute(
+                await session.execute(
                     text(
                         """
                         INSERT INTO evaluation_records (
@@ -194,18 +194,20 @@ class SessionService:
                         "metrics_json": _json_dumps(evaluation),
                     },
                 )
-            connection.execute(
+            await session.execute(
                 text("UPDATE qa_sessions SET collection_name=:collection_name, updated_at=NOW() WHERE session_id=:session_id"),
                 {"collection_name": cname, "session_id": sid},
             )
-        return self.get_session(sid) or self.load_session(sid, cname)
+            await session.commit()
+        return await self.get_session(sid) or await self.load_session(sid, cname)
 
-    def get_session(self, session_id: str) -> Dict[str, Any] | None:
+    async def get_session(self, session_id: str) -> Dict[str, Any] | None:
         sid = _clean_str(session_id)
         if not sid:
             return None
-        with self.engine.begin() as connection:
-            session = connection.execute(
+        async with get_async_session(backend=self.backend) as db_session:
+            session = (
+                await db_session.execute(
                 text(
                     """
                     SELECT session_id, collection_name, metadata_json, created_at, updated_at
@@ -214,11 +216,13 @@ class SessionService:
                     """
                 ),
                 {"session_id": sid},
+                )
             ).mappings().first()
             if session is None:
                 return None
 
-            message_rows = connection.execute(
+            message_rows = (
+                await db_session.execute(
                 text(
                     """
                     SELECT message_id, role, query_type, question, answer, decision, confidence,
@@ -229,8 +233,10 @@ class SessionService:
                     """
                 ),
                 {"session_id": sid},
+                )
             ).mappings().all()
-            trace_rows = connection.execute(
+            trace_rows = (
+                await db_session.execute(
                 text(
                     """
                     SELECT trace_id, message_id, collection_name, question, expanded_queries_json,
@@ -241,6 +247,7 @@ class SessionService:
                     """
                 ),
                 {"session_id": sid},
+                )
             ).mappings().all()
 
         messages: List[Dict[str, Any]] = []
@@ -291,20 +298,22 @@ class SessionService:
             "retrieval_traces": traces,
         }
 
-    def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]) -> None:
+    async def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]) -> None:
         sid = _clean_str(session_id)
         if not sid:
             return
-        with self.engine.begin() as connection:
-            current = connection.execute(
+        async with get_async_session(backend=self.backend) as session:
+            current = (
+                await session.execute(
                 text("SELECT metadata_json FROM qa_sessions WHERE session_id = :session_id"),
                 {"session_id": sid},
+                )
             ).scalar()
             payload = _json_loads(current, {})
             if not isinstance(payload, dict):
                 payload = {}
             payload.update(dict(metadata or {}))
-            connection.execute(
+            await session.execute(
                 text(
                     """
                     UPDATE qa_sessions
@@ -314,25 +323,29 @@ class SessionService:
                 ),
                 {"session_id": sid, "metadata_json": _json_dumps(payload)},
             )
+            await session.commit()
 
-    def upsert_collection_chunks(
+    async def upsert_collection_chunks(
         self,
         collection_name: str,
         chunks: List[Dict[str, Any]],
         force_rebuild: bool = False,
     ) -> Dict[str, Any]:
         cname = _clean_str(collection_name) or "default"
-        with self.engine.begin() as connection:
-            count = connection.execute(
+        async with get_async_session(backend=self.backend) as session:
+            count = (
+                await session.execute(
                 text("SELECT COUNT(*) FROM pdf_chunks WHERE collection_name = :collection_name"),
                 {"collection_name": cname},
+                )
             ).scalar()
         return {"collection_name": cname, "chunk_count": int(count or 0)}
 
-    def get_collection_chunks(self, collection_name: str) -> List[Dict[str, Any]]:
+    async def get_collection_chunks(self, collection_name: str) -> List[Dict[str, Any]]:
         cname = _clean_str(collection_name) or "default"
-        with self.engine.begin() as connection:
-            rows = connection.execute(
+        async with get_async_session(backend=self.backend) as session:
+            rows = (
+                await session.execute(
                 text(
                     """
                     SELECT chunk_id, doc_id, collection_name, doc_source, page_idx, page_range,
@@ -343,6 +356,7 @@ class SessionService:
                     """
                 ),
                 {"collection_name": cname},
+                )
             ).mappings().all()
         result: List[Dict[str, Any]] = []
         for row in rows:
@@ -351,9 +365,27 @@ class SessionService:
             result.append(item)
         return result
 
-    def _ensure_session(self, session_id: str, collection_name: str) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
+    async def delete_collection_doc_source(self, collection_name: str, doc_source: str) -> int:
+        cname = _clean_str(collection_name) or "default"
+        source = _clean_str(doc_source)
+        if not source:
+            return 0
+        async with get_async_session(backend=self.backend) as session:
+            result = await session.execute(
+                text(
+                    """
+                    DELETE FROM pdf_chunks
+                    WHERE collection_name = :collection_name AND doc_source = :doc_source
+                    """
+                ),
+                {"collection_name": cname, "doc_source": source},
+            )
+            await session.commit()
+        return int(result.rowcount or 0)
+
+    async def _ensure_session(self, session_id: str, collection_name: str) -> None:
+        async with get_async_session(backend=self.backend) as session:
+            await session.execute(
                 text(
                     """
                     INSERT INTO qa_sessions (session_id, collection_name, metadata_json, created_at, updated_at)
@@ -365,6 +397,7 @@ class SessionService:
                 ),
                 {"session_id": session_id, "collection_name": collection_name},
             )
+            await session.commit()
 
 
 _SESSION_SERVICE = SessionService()
