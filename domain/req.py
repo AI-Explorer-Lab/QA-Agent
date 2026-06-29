@@ -12,6 +12,7 @@ class QARequest(BaseModel):
     top_k: int = 5
     expand_query_num: int = 3
     enable_cache: bool = True
+    use_llm_intent_slot: bool = False
     include_debug: bool = False
 
 

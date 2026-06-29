@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_iterations": 6,
         "skill_trace_enabled": True,
         "default_skill": "fact_lookup",
+        "use_llm_intent_slot": False,
     },
     "skills": {
         "enabled": [

@@ -98,6 +98,7 @@ agent:
   max_iterations: 6
   skill_trace_enabled: true
   default_skill: fact_lookup
+  use_llm_intent_slot: false
 skills:
   enabled:
     - fact_lookup
