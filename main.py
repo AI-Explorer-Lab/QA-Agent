@@ -48,6 +48,7 @@ async def preload_runtime_models() -> None:
     reranker_cfg = config.get("reranker", {}) if isinstance(config.get("reranker"), dict) else {}
     if not bool(reranker_cfg.get("cross_encoder_preload_on_startup", False)):
         return
+    cross_encoder_required = bool(reranker_cfg.get("cross_encoder_enabled", True))
     try:
         import asyncio
 
@@ -62,6 +63,10 @@ async def preload_runtime_models() -> None:
         log_operation_event("runtime.cross_encoder_preload", status="started")
         result = await asyncio.to_thread(warmup)
         log_operation_event("runtime.cross_encoder_preload", **result)
+        status = str((result or {}).get("status") or "").strip().lower()
+        if cross_encoder_required and status != "loaded":
+            reason = str((result or {}).get("reason") or "cross_encoder_preload_failed")
+            raise RuntimeError(f"Cross-encoder preload did not complete: {reason}")
     except Exception as exc:
         log_operation_event(
             "runtime.cross_encoder_preload",
@@ -69,6 +74,7 @@ async def preload_runtime_models() -> None:
             error_type=type(exc).__name__,
             error=str(exc)[:500],
         )
+        raise
 
 
 def _env_bool(name: str, default: bool) -> bool:

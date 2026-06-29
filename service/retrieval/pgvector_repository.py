@@ -116,12 +116,14 @@ class PgvectorRepository:
         backend: str = "pgvector",
         database_url: str = "",
         embedding_dim: int = 1024,
+        sparse_scan_limit: int = 3000,
         local_chunks: Iterable[Mapping[str, Any]] | None = None,
     ) -> None:
         if int(embedding_dim) != 1024:
             raise ValueError("embedding_dim must be 1024.")
 
         self.embedding_dim = 1024
+        self.sparse_scan_limit = max(200, int(sparse_scan_limit or 3000))
         self.backend = str(backend or "pgvector").strip().lower()
         self.database_url = str(database_url or "").strip()
         self._local_chunks: list[Dict[str, Any]] = []
@@ -758,7 +760,7 @@ class PgvectorRepository:
             """
         )
 
-        scan_limit = max(200, int(top_k) * 40)
+        scan_limit = max(200, int(top_k) * 40, self.sparse_scan_limit)
         candidates: list[Dict[str, Any]] = []
         async with get_async_session(backend="pgvector", database_url=self.database_url) as session:
             records = (

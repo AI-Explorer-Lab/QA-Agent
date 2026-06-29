@@ -139,6 +139,20 @@ def _candidate_pair_text(candidate: Dict[str, Any]) -> str:
     return "\n".join(cleaned)
 
 
+def _candidate_search_text(candidate: Dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(candidate.get("heading_path") or ""),
+            str(candidate.get("level1_title") or ""),
+            str(candidate.get("level2_title") or ""),
+            str(candidate.get("level3_title") or ""),
+            str(candidate.get("table_header_text") or ""),
+            str(candidate.get("table_context_text") or ""),
+            str(candidate.get("raw_doc") or candidate.get("content") or ""),
+        ]
+    ).strip()
+
+
 def _normalize_exact_text(text: str) -> str:
     normalized = str(text or "").lower()
     normalized = re.sub(r"\s+", "", normalized)
@@ -154,6 +168,19 @@ def _near_duplicate_score(tokens_a: set[str], tokens_b: set[str]) -> float:
     containment = intersection / max(1, min(len(tokens_a), len(tokens_b)))
     jaccard = intersection / max(1, union)
     return max(containment, jaccard)
+
+
+def _candidate_recall_score(candidate: Dict[str, Any]) -> float:
+    for key in ("hybrid_recall_score", "retrieval_score"):
+        if key in candidate:
+            return _clip01(_safe_float(candidate.get(key)))
+    return _clip01(
+        max(
+            _safe_float(candidate.get("dense_score")),
+            _safe_float(candidate.get("bm25_score")),
+            _safe_float(candidate.get("table_route_score")),
+        )
+    )
 
 
 class TwoStageHybridReranker:
@@ -222,19 +249,10 @@ class TwoStageHybridReranker:
             payload["bm25_score"] = _clip01(bm25_norm[index])
             payload["metadata_boost"] = _metadata_boost(query_tokens, page_hint, payload)
             payload["table_boost"] = _table_boost(query_tokens, payload, query_type)
-
-            payload["final_score"] = _clip01(
-                self.dense_weight * payload["dense_score"]
-                + self.bm25_weight * payload["bm25_score"]
-                + self.metadata_boost_weight * payload["metadata_boost"]
-                + self.table_boost_weight * payload["table_boost"]
-            )
-            payload["light_final_score"] = payload["final_score"]
-            payload["confidence_score"] = payload["final_score"]
-            payload["rank_score"] = payload["final_score"]
+            payload["hybrid_recall_score"] = _candidate_recall_score(payload)
             scored.append(payload)
 
-        scored.sort(key=lambda item: _safe_float(item.get("rank_score") or item.get("final_score")), reverse=True)
+        scored.sort(key=_candidate_recall_score, reverse=True)
 
         deduped: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -269,11 +287,13 @@ class TwoStageHybridReranker:
         candidate_pool_limit = max(limit, self.cross_encoder_candidate_pool)
         seed_pool = deduped[:limit]
         seed_pool, neighbor_supplemented = self._supplement_neighbors(seed_pool, deduped, limit)
-        light_pool = self._merge_unique(seed_pool, deduped, candidate_pool_limit)
+        protected_pool = self._select_protected_candidates(deduped, query_tokens, candidate_pool_limit, limit)
+        light_pool = self._merge_unique(seed_pool, protected_pool, deduped, limit=candidate_pool_limit)
         light_pool = self._finalize_selection(light_pool, deduped, candidate_pool_limit, query_type, quota)
+        light_pool = self._merge_unique(seed_pool, protected_pool, light_pool, limit=candidate_pool_limit)
         selected, cross_encoder_trace = self._cross_encoder_rerank(query, light_pool, limit, query_type, quota)
         if not selected:
-            selected = light_pool[:limit]
+            selected = self._fallback_select(light_pool, limit, query_type, quota)
 
         trace = {
             "weights": {
@@ -283,26 +303,33 @@ class TwoStageHybridReranker:
                 "table_boost_weight": self.table_boost_weight,
             },
             "query_type": query_type,
+            "ranking_mode": "cross_encoder_only",
+            "candidate_pool_order": "hybrid_recall_score",
             "input_candidates": len(rows),
             "after_near_duplicate": len(deduped),
+            "candidate_pool_size": len(light_pool),
             "light_candidate_pool_size": len(light_pool),
             "cross_encoder_candidate_pool": candidate_pool_limit,
             "cross_encoder": cross_encoder_trace,
+            "fallback_score_source": "hybrid_recall_score",
             "table_evidence_quota": quota,
             "table_evidence_selected": sum(1 for row in selected if str(row.get("chunk_type") or "") == "table"),
             "neighbor_supplemented": neighbor_supplemented,
+            "protected_candidate_count": len(protected_pool),
             "top": [
                 {
                     "chunk_id": row.get("chunk_id"),
                     "final_score": row.get("final_score"),
                     "rank_score": row.get("rank_score"),
                     "confidence_score": row.get("confidence_score"),
-                    "light_final_score": row.get("light_final_score"),
+                    "hybrid_recall_score": row.get("hybrid_recall_score"),
+                    "retrieval_score": row.get("retrieval_score"),
                     "dense_score": row.get("dense_score"),
                     "bm25_score": row.get("bm25_score"),
                     "metadata_boost": row.get("metadata_boost"),
                     "table_boost": row.get("table_boost"),
                     "cross_encoder_score": row.get("cross_encoder_score"),
+                    "score_source": row.get("score_source"),
                 }
                 for row in selected[: min(len(selected), 10)]
             ],
@@ -320,14 +347,19 @@ class TwoStageHybridReranker:
                 "table_boost_weight": self.table_boost_weight,
             },
             "query_type": query_type,
+            "ranking_mode": "cross_encoder_only",
+            "candidate_pool_order": "hybrid_recall_score",
             "input_candidates": 0,
             "after_near_duplicate": 0,
+            "candidate_pool_size": 0,
             "light_candidate_pool_size": 0,
             "cross_encoder_candidate_pool": self.cross_encoder_candidate_pool,
             "cross_encoder": {"status": "skipped", "reason": "empty_candidates"},
+            "fallback_score_source": "hybrid_recall_score",
             "table_evidence_quota": quota,
             "table_evidence_selected": 0,
             "neighbor_supplemented": 0,
+            "protected_candidate_count": 0,
             "top": [],
             "top_k": max(1, int(top_k)),
         }
@@ -341,14 +373,18 @@ class TwoStageHybridReranker:
         quota: int,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if not self.cross_encoder_enabled:
-            return list(light_pool[:limit]), {"status": "disabled"}
+            return self._fallback_select(light_pool, limit, query_type, quota), {"status": "disabled"}
         if not light_pool:
             return [], {"status": "skipped", "reason": "empty_candidate_pool"}
 
         scorer = self._get_cross_encoder_scorer()
         if scorer is None:
             reason = self._cross_encoder_load_failed or "scorer_unavailable"
-            return list(light_pool[:limit]), {"status": "fallback", "reason": reason, "model": self.cross_encoder_model}
+            return self._fallback_select(light_pool, limit, query_type, quota), {
+                "status": "fallback",
+                "reason": reason,
+                "model": self.cross_encoder_model,
+            }
 
         texts = [_candidate_pair_text(item) for item in light_pool]
         try:
@@ -362,18 +398,18 @@ class TwoStageHybridReranker:
             trace.setdefault("status", "fallback")
             trace.setdefault("reason", "invalid_score_count")
             trace.setdefault("model", self.cross_encoder_model)
-            return list(light_pool[:limit]), trace
+            return self._fallback_select(light_pool, limit, query_type, quota), trace
 
         normalized_scores = _normalize_relative_scores([float(score) for score in scores])
 
         scored_rows: List[Dict[str, Any]] = []
         for row, score, normalized_score in zip(light_pool, scores, normalized_scores):
             payload = dict(row)
-            payload["light_final_score"] = _safe_float(payload.get("final_score"))
             payload["cross_encoder_score"] = float(score)
             payload["rank_score"] = float(score)
             payload["confidence_score"] = float(normalized_score)
             payload["final_score"] = float(normalized_score)
+            payload["score_source"] = "cross_encoder"
             scored_rows.append(payload)
 
         scored_rows.sort(key=lambda item: _safe_float(item.get("rank_score")), reverse=True)
@@ -384,6 +420,26 @@ class TwoStageHybridReranker:
         trace["input_candidates"] = len(light_pool)
         trace["selected"] = len(selected)
         return selected, trace
+
+    def _fallback_select(
+        self,
+        light_pool: Sequence[Dict[str, Any]],
+        limit: int,
+        query_type: str,
+        quota: int,
+    ) -> List[Dict[str, Any]]:
+        fallback_rows: List[Dict[str, Any]] = []
+        for row in light_pool:
+            payload = dict(row)
+            recall_score = _candidate_recall_score(payload)
+            payload["hybrid_recall_score"] = recall_score
+            payload["rank_score"] = recall_score
+            payload["confidence_score"] = recall_score
+            payload["final_score"] = recall_score
+            payload["score_source"] = "hybrid_recall_score"
+            fallback_rows.append(payload)
+        fallback_rows.sort(key=_candidate_recall_score, reverse=True)
+        return self._finalize_selection(fallback_rows[:limit], fallback_rows, limit, query_type, quota)
 
     def _get_cross_encoder_scorer(self) -> Any | None:
         if self._cross_encoder_scorer is not None:
@@ -433,12 +489,12 @@ class TwoStageHybridReranker:
     def _merge_unique(
         self,
         preferred: Sequence[Dict[str, Any]],
-        ranked: Sequence[Dict[str, Any]],
+        *ranked_sources: Sequence[Dict[str, Any]],
         limit: int,
     ) -> List[Dict[str, Any]]:
         merged: List[Dict[str, Any]] = []
         seen: set[str] = set()
-        for source in (preferred, ranked):
+        for source in (preferred, *ranked_sources):
             for item in source:
                 cid = _candidate_id(item)
                 if cid in seen:
@@ -448,6 +504,41 @@ class TwoStageHybridReranker:
                 if len(merged) >= limit:
                     return merged
         return merged
+
+    def _select_protected_candidates(
+        self,
+        ranked: Sequence[Dict[str, Any]],
+        query_tokens: set[str],
+        candidate_pool_limit: int,
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        if not ranked or candidate_pool_limit <= top_k:
+            return []
+
+        protected_limit = min(
+            max(2 * max(1, int(top_k)), 12),
+            max(0, int(candidate_pool_limit) - max(1, int(top_k))),
+        )
+        if protected_limit <= 0:
+            return []
+
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for item in ranked:
+            bm25_score = _safe_float(item.get("bm25_score"))
+            if bm25_score < 0.45:
+                continue
+
+            lexical_score = _token_overlap_score(query_tokens, _candidate_search_text(item))
+            if lexical_score < 0.04:
+                continue
+
+            source_channels = {str(channel).lower() for channel in item.get("source_channels") or []}
+            channel_bonus = 0.05 if "bm25" in source_channels or "sparse" in source_channels else 0.0
+            protection_score = 0.75 * bm25_score + 0.20 * lexical_score + channel_bonus
+            scored.append((protection_score, item))
+
+        scored.sort(key=lambda row: row[0], reverse=True)
+        return [dict(item) for _, item in scored[:protected_limit]]
 
     def _finalize_selection(
         self,
@@ -468,7 +559,7 @@ class TwoStageHybridReranker:
                 merged.append(item)
                 seen.add(cid)
 
-        merged.sort(key=lambda row: _safe_float(row.get("rank_score") or row.get("final_score")), reverse=True)
+        merged.sort(key=lambda row: _safe_float(row.get("rank_score") or row.get("final_score") or _candidate_recall_score(row)), reverse=True)
         if str(query_type or "") != "table_qa" or quota <= 0:
             return merged[:limit]
 
@@ -541,7 +632,7 @@ class TwoStageHybridReranker:
                 if abs(candidate_chunk - current_chunk) > 1:
                     continue
 
-                score = _safe_float(candidate.get("rank_score") or candidate.get("final_score"))
+                score = _candidate_recall_score(candidate)
                 if score > neighbor_score:
                     neighbor = dict(candidate)
                     neighbor_score = score
@@ -549,12 +640,10 @@ class TwoStageHybridReranker:
             if neighbor is None:
                 continue
 
-            neighbor["final_score"] = _clip01(_safe_float(neighbor.get("final_score")) + 0.02)
-            neighbor["confidence_score"] = _clip01(_safe_float(neighbor.get("confidence_score") or neighbor.get("final_score")) + 0.02)
-            neighbor["rank_score"] = _safe_float(neighbor.get("rank_score") or neighbor.get("final_score")) + 0.02
+            neighbor["hybrid_recall_score"] = _clip01(_candidate_recall_score(neighbor) + 0.02)
             chosen[_candidate_id(neighbor)] = neighbor
             supplemented += 1
 
         final_rows = list(chosen.values())
-        final_rows.sort(key=lambda item: _safe_float(item.get("final_score")), reverse=True)
+        final_rows.sort(key=_candidate_recall_score, reverse=True)
         return final_rows, supplemented
