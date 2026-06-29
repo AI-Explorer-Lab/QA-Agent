@@ -229,7 +229,7 @@ class SessionService:
                            citations_json, evidence_json, metadata_json, retrieval_trace_id, created_at
                     FROM qa_messages
                     WHERE session_id = :session_id
-                    ORDER BY created_at ASC, message_id ASC
+                    ORDER BY created_at ASC, CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END, message_id ASC
                     """
                 ),
                 {"session_id": sid},

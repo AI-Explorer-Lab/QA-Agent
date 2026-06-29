@@ -132,6 +132,7 @@ async def _run_qa(request: QARequest, collection_name: str, progress_callback=No
         top_k=request.top_k,
         expand_query_num=request.expand_query_num,
         enable_cache=request.enable_cache,
+        use_llm_intent_slot=request.use_llm_intent_slot,
         progress_callback=progress_callback,
     )
 

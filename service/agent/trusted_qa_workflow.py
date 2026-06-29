@@ -452,11 +452,17 @@ class TrustedQAWorkflow:
         }
         return retrieval_result, expanded, llm_expanded, llm_expansion_used, stage
 
-    async def _understand_question(self, question: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    async def _understand_question(
+        self,
+        question: str,
+        conversation_context: Dict[str, Any] | None = None,
+        use_llm_intent_slot: bool | None = None,
+    ) -> Dict[str, Any]:
         return await self.understanding_agent.understand(
             question,
             skill_registry=self.skill_registry,
             conversation_context=conversation_context or {},
+            use_llm_intent_slot=use_llm_intent_slot,
         )
 
     @staticmethod
@@ -484,6 +490,7 @@ class TrustedQAWorkflow:
         top_k: int,
         expand_query_num: int,
         enable_cache: bool,
+        use_llm_intent_slot: bool,
     ) -> Dict[str, Any]:
         workflow_started_at = time.perf_counter()
         return {
@@ -493,6 +500,7 @@ class TrustedQAWorkflow:
             "top_k": max(1, int(top_k)),
             "expand_query_num": max(1, int(expand_query_num)),
             "enable_cache": bool(enable_cache),
+            "use_llm_intent_slot": bool(use_llm_intent_slot),
             "retry_count": 0,
             "observations": [],
             "workflow_started_at": workflow_started_at,
@@ -583,7 +591,11 @@ class TrustedQAWorkflow:
     async def _graph_understand_intent_and_slots(self, state: Dict[str, Any]) -> Dict[str, Any]:
         question = str(state.get("effective_question") or state.get("question") or "")
         started_at = time.perf_counter()
-        understanding = await self._understand_question(question, conversation_context=state.get("turn_route") or {})
+        understanding = await self._understand_question(
+            question,
+            conversation_context=state.get("turn_route") or {},
+            use_llm_intent_slot=bool(state.get("use_llm_intent_slot", False)),
+        )
         intent_trace = dict(understanding.get("intent_trace") or {})
         query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")
         intent_duration_ms = _duration_ms(started_at)
@@ -894,11 +906,22 @@ class TrustedQAWorkflow:
         top_k: int,
         expand_query_num: int,
         enable_cache: bool,
+        use_llm_intent_slot: bool,
     ) -> Optional[Dict[str, Any]]:
         app = self._langgraph_app_instance()
         if app is None:
             return None
-        result = await app.ainvoke(self._langgraph_initial_state(question, collection_name, session_id, top_k, expand_query_num, enable_cache))
+        result = await app.ainvoke(
+            self._langgraph_initial_state(
+                question,
+                collection_name,
+                session_id,
+                top_k,
+                expand_query_num,
+                enable_cache,
+                use_llm_intent_slot,
+            )
+        )
         if isinstance(result, dict) and isinstance(result.get("response"), dict):
             return result.get("response")
         return None
@@ -911,11 +934,20 @@ class TrustedQAWorkflow:
         top_k: int,
         expand_query_num: int,
         enable_cache: bool,
+        use_llm_intent_slot: bool,
     ) -> Optional[Dict[str, Any]]:
         if not self.langgraph_enabled or not self.langgraph_available or _LANGGRAPH_BYPASS.get():
             return None
         try:
-            return await self._ask_with_langgraph(question=question, collection_name=collection_name, session_id=session_id, top_k=top_k, expand_query_num=expand_query_num, enable_cache=enable_cache)
+            return await self._ask_with_langgraph(
+                question=question,
+                collection_name=collection_name,
+                session_id=session_id,
+                top_k=top_k,
+                expand_query_num=expand_query_num,
+                enable_cache=enable_cache,
+                use_llm_intent_slot=use_llm_intent_slot,
+            )
         except Exception:
             return None
 
@@ -927,6 +959,7 @@ class TrustedQAWorkflow:
         top_k: int = 5,
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        use_llm_intent_slot: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         if progress_callback is not None:
@@ -937,12 +970,29 @@ class TrustedQAWorkflow:
                 top_k=top_k,
                 expand_query_num=expand_query_num,
                 enable_cache=enable_cache,
+                use_llm_intent_slot=use_llm_intent_slot,
                 progress_callback=progress_callback,
             )
-        langgraph_response = await self._maybe_run_langgraph(question=question, collection_name=collection_name, session_id=session_id, top_k=top_k, expand_query_num=expand_query_num, enable_cache=enable_cache)
+        langgraph_response = await self._maybe_run_langgraph(
+            question=question,
+            collection_name=collection_name,
+            session_id=session_id,
+            top_k=top_k,
+            expand_query_num=expand_query_num,
+            enable_cache=enable_cache,
+            use_llm_intent_slot=use_llm_intent_slot,
+        )
         if isinstance(langgraph_response, dict):
             return langgraph_response
-        return await self._ask_legacy(question=question, collection_name=collection_name, session_id=session_id, top_k=top_k, expand_query_num=expand_query_num, enable_cache=enable_cache)
+        return await self._ask_legacy(
+            question=question,
+            collection_name=collection_name,
+            session_id=session_id,
+            top_k=top_k,
+            expand_query_num=expand_query_num,
+            enable_cache=enable_cache,
+            use_llm_intent_slot=use_llm_intent_slot,
+        )
     async def _ask_legacy(
         self,
         question: str,
@@ -951,6 +1001,7 @@ class TrustedQAWorkflow:
         top_k: int = 5,
         expand_query_num: int = 3,
         enable_cache: bool = True,
+        use_llm_intent_slot: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         workflow_started_at = time.perf_counter()
@@ -984,7 +1035,11 @@ class TrustedQAWorkflow:
 
         intent_started_at = time.perf_counter()
         await _emit_progress_marker(progress_callback, "intent_slot_understanding_agent")
-        understanding = await self._understand_question(effective_question, conversation_context=turn_route)
+        understanding = await self._understand_question(
+            effective_question,
+            conversation_context=turn_route,
+            use_llm_intent_slot=use_llm_intent_slot,
+        )
         intent_duration_ms = _duration_ms(intent_started_at)
         intent_trace = dict(understanding.get("intent_trace") or {})
         query_type = str(understanding.get("query_type") or intent_trace.get("query_type") or "fact_lookup")

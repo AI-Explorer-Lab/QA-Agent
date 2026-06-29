@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
@@ -17,6 +18,7 @@ from service.agent.query_classifier import (
 )
 from service.agent.schemas import QUERY_TYPE_SET, normalize_query_type
 from service.agent.skills import SkillDefinition
+from utils.config_loader import get_app_config
 from utils.content_normalizer import normalize_whitespace
 
 try:
@@ -87,6 +89,10 @@ class SlotFillSchema(BaseModel):
 
 class QuestionUnderstandingSchema(BaseModel):
     query_type: str = "fact_lookup"
+    secondary_intents: List[str] = Field(default_factory=list)
+    need_citation: bool = False
+    citation_mode: str = ""
+    answer_should_include: List[str] = Field(default_factory=list)
     matched_keyword_group: str = ""
     intent: str = ""
     reason: str = ""
@@ -316,9 +322,43 @@ def _rule_slots_sufficient(slots: Mapping[str, Any], skill: SkillDefinition | No
     return not skill.get_missing_slots(dict(slots))
 
 
+def _config_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_llm_intent_slot_enabled(explicit: bool | None = None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+
+    env_value = os.getenv("TRUSTED_QA_USE_LLM_INTENT_SLOT")
+    if env_value is not None and env_value.strip():
+        return _config_bool(env_value)
+
+    try:
+        config = get_app_config()
+    except Exception:
+        config = {}
+    agent_cfg = config.get("agent", {}) if isinstance(config.get("agent"), dict) else {}
+    return _config_bool(
+        agent_cfg.get(
+            "use_llm_intent_slot",
+            agent_cfg.get("llm_intent_slot_enabled", agent_cfg.get("use_llm_understanding")),
+        ),
+        default=False,
+    )
+
+
 class QuestionUnderstandingAgent:
-    def __init__(self, llm_service: Any | None = None) -> None:
+    def __init__(self, llm_service: Any | None = None, use_llm_intent_slot: bool | None = None) -> None:
         self.llm_service = llm_service
+        self.use_llm_intent_slot = _resolve_llm_intent_slot_enabled(use_llm_intent_slot)
         self.intent_agent = IntentUnderstandingAgent(llm_service)
         self.slot_agent = SlotFillingAgent(llm_service)
 
@@ -327,7 +367,21 @@ class QuestionUnderstandingAgent:
         question: str,
         skill_registry: Any,
         conversation_context: Mapping[str, Any] | None = None,
+        use_llm_intent_slot: bool | None = None,
     ) -> Dict[str, Any]:
+        use_llm_for_request = self.use_llm_intent_slot if use_llm_intent_slot is None else bool(use_llm_intent_slot)
+        llm_attempted = False
+        if use_llm_for_request:
+            llm_attempted = True
+            llm_result = await self._understand_with_llm(
+                question,
+                skill_registry,
+                conversation_context=conversation_context,
+                include_answer_requirements=True,
+            )
+            if llm_result is not None:
+                return llm_result
+
         rule_query_type = _keyword_query_type(question)
         if rule_query_type is not None:
             selected_skill = skill_registry.select_skill(rule_query_type)
@@ -362,9 +416,15 @@ class QuestionUnderstandingAgent:
                 intent_trace["understanding_source"] = "rule_classifier"
                 return {"intent_trace": intent_trace, "query_type": classifier_query_type, "selected_skill": selected_skill, "slots": slots}
 
-        llm_result = await self._understand_with_llm(question, skill_registry, conversation_context=conversation_context)
-        if llm_result is not None:
-            return llm_result
+        if not llm_attempted:
+            llm_result = await self._understand_with_llm(
+                question,
+                skill_registry,
+                conversation_context=conversation_context,
+                include_answer_requirements=False,
+            )
+            if llm_result is not None:
+                return llm_result
 
         query_type = rule_query_type or self.intent_agent._fallback_query_type(question)
         selected_skill = skill_registry.select_skill(query_type)
@@ -385,6 +445,7 @@ class QuestionUnderstandingAgent:
         question: str,
         skill_registry: Any,
         conversation_context: Mapping[str, Any] | None = None,
+        include_answer_requirements: bool = False,
     ) -> Dict[str, Any] | None:
         catalog = []
         for item in skill_registry.skill_catalog():
@@ -406,15 +467,32 @@ class QuestionUnderstandingAgent:
                 "skill_catalog": catalog,
                 "fixed_schema": {
                     "query_type": "one allowed query type",
+                    **(
+                        {
+                            "secondary_intents": "other allowed query types that the answer must also satisfy",
+                            "need_citation": "true when the user asks for source, citation,出处,页码,位置,依据, or provenance",
+                            "citation_mode": "source_for_answer, locate_statement, or empty",
+                            "answer_should_include": "fields the final answer should include, such as value, unit, source_snippet, page_or_location",
+                        }
+                        if include_answer_requirements
+                        else {}
+                    ),
                     "matched_keyword_group": "keyword group name or empty",
                     "intent": "short snake_case intent",
                     "reason": "brief reason",
                     **{key: [] if key in {"years", "compare_targets"} else "" for key in SLOT_KEYS},
                 },
-                "instructions": "Use the selected skill required slots. Do not invent unsupported slots; use empty strings or empty lists when absent.",
+                "instructions": (
+                    "Use the selected skill required slots. Do not invent unsupported slots; use empty strings or empty lists when absent. "
+                    "For compound questions, keep query_type as the primary answer task and put extra requirements in secondary_intents. "
+                    "If the user asks for a value plus source/citation/page/origin, keep table_qa or fact_lookup as query_type, set need_citation=true, "
+                    "set citation_mode=source_for_answer, and include source_snippet/page_or_location in answer_should_include."
+                    if include_answer_requirements
+                    else "Use the selected skill required slots. Do not invent unsupported slots; use empty strings or empty lists when absent."
+                ),
             },
             schema=QuestionUnderstandingSchema,
-            max_tokens=650,
+            max_tokens=800 if include_answer_requirements else 650,
         )
         if not parsed:
             return None
@@ -437,7 +515,44 @@ class QuestionUnderstandingAgent:
         slots["__slot_fill_source__"] = "llm_combined"
         slots["__skill_name__"] = selected_skill.skill_name
         slots["__missing_required__"] = selected_skill.get_missing_slots(slots)
-        return {"intent_trace": intent_trace, "query_type": query_type, "selected_skill": selected_skill, "slots": slots}
+        result = {"intent_trace": intent_trace, "query_type": query_type, "selected_skill": selected_skill, "slots": slots}
+
+        if include_answer_requirements:
+            secondary_intents: List[str] = []
+            for item in _clean_list(parsed.get("secondary_intents")):
+                secondary = normalize_query_type(item)
+                if secondary in QUERY_TYPE_SET and secondary != query_type and secondary not in secondary_intents:
+                    secondary_intents.append(secondary)
+            need_citation = _config_bool(parsed.get("need_citation"), default=False)
+            citation_mode = _clean_str(parsed.get("citation_mode"))
+            answer_should_include = _clean_list(parsed.get("answer_should_include"))
+            if need_citation and query_type != "citation_locate" and "citation_locate" not in secondary_intents:
+                secondary_intents.append("citation_locate")
+            if need_citation and not citation_mode:
+                citation_mode = "source_for_answer"
+            if need_citation and not answer_should_include:
+                answer_should_include = ["source_snippet", "page_or_location"]
+                if query_type == "table_qa":
+                    answer_should_include = ["value", "unit", *answer_should_include]
+            intent_trace["secondary_intents"] = secondary_intents
+            intent_trace["need_citation"] = need_citation
+            intent_trace["citation_mode"] = citation_mode
+            intent_trace["answer_should_include"] = answer_should_include
+            result.update(
+                {
+                    "secondary_intents": secondary_intents,
+                    "need_citation": need_citation,
+                    "citation_mode": citation_mode,
+                    "answer_should_include": answer_should_include,
+                    "answer_requirements": {
+                        "need_citation": need_citation,
+                        "citation_mode": citation_mode,
+                        "answer_should_include": answer_should_include,
+                    },
+                }
+            )
+
+        return result
 
 
 class IntentUnderstandingAgent:
