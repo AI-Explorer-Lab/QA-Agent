@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
 from service.agent.clarify_gate import extract_slots
+from service.agent.evidence_context import build_audit_evidence_brief
 from service.agent.query_classifier import (
     _CITATION_KEYWORDS,
     _COMPARE_KEYWORDS,
@@ -64,6 +65,7 @@ INTENT_NAMES = {
 SLOT_KEYS = ("years", "metric", "period", "target_statement", "compare_targets", "scope", "table_name", "unit", "focus")
 FINAL_AUDIT_DECISIONS = {"answer", "retry", "refuse"}
 DECISION_RANK = {"answer": 0, "retry": 1, "refuse": 2}
+HARD_RULE_REASONS = {"no_evidence", "no_evidence_after_retry"}
 YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
@@ -113,6 +115,7 @@ class EvidenceAuditSchema(BaseModel):
     evidence_coverage: str = "partial"
     conflict_detected: bool = False
     suggested_retry_query: str = ""
+    usable_evidence_ids: List[str] = Field(default_factory=list)
     reason: str = ""
 
 
@@ -762,20 +765,19 @@ class EvidenceAuditAgent:
         if audit_payload.get("missing_aspects"):
             result["missing_aspects"] = _clean_list(audit_payload.get("missing_aspects"))
 
-        if gate_decision == "refuse":
+        gate_reason = _clean_str(gate_payload.get("reason"))
+        if gate_reason in HARD_RULE_REASONS:
             result["decision"] = gate_decision
-            result["reason"] = _clean_str(gate_payload.get("reason") or result.get("reason") or audit_payload.get("reason"))
+            result["reason"] = _clean_str(gate_reason or result.get("reason") or audit_payload.get("reason"))
             result["suggested_retry_query"] = ""
             return result
 
-        final_decision = gate_decision
         audit_decision = audit_payload["semantic_decision"]
-        if gate_decision == "answer" and DECISION_RANK[audit_decision] > DECISION_RANK[gate_decision]:
-            final_decision = audit_decision
+        final_decision = audit_decision
 
         result["decision"] = final_decision
         if final_decision == "answer":
-            result["reason"] = _clean_str(gate_payload.get("reason") or audit_payload.get("reason") or "evidence_passed")
+            result["reason"] = _clean_str(audit_payload.get("reason") or gate_payload.get("reason") or "evidence_passed")
             result["suggested_retry_query"] = ""
             return result
 
@@ -872,17 +874,13 @@ class EvidenceAuditAgent:
         evidence: Sequence[Mapping[str, Any]],
         rerank_trace: Mapping[str, Any] | None,
     ) -> Dict[str, Any] | None:
-        evidence_brief = []
-        for index, item in enumerate(list(evidence)[:6], start=1):
-            evidence_brief.append(
-                {
-                    "rank": index,
-                    "chunk_type": item.get("chunk_type", ""),
-                    "doc_source": item.get("doc_source", ""),
-                    "content": _clean_str(item.get("content") or item.get("raw_doc"))[:500],
-                    "score": item.get("final_score") or item.get("score"),
-                }
-            )
+        evidence_brief = build_audit_evidence_brief(
+            question=question,
+            query_type=query_type,
+            slots=slots,
+            evidence=evidence,
+            limit=6,
+        )
         parsed = await _safe_structured_json(
             self.llm_service,
             "Audit whether the retrieved evidence semantically covers the question. Return only JSON.",
@@ -899,6 +897,7 @@ class EvidenceAuditAgent:
                     "evidence_coverage": "sufficient | partial | poor",
                     "conflict_detected": False,
                     "suggested_retry_query": "",
+                    "usable_evidence_ids": ["C1", "C3"],
                     "reason": "",
                 },
             },
@@ -1002,6 +1001,7 @@ class EvidenceAuditAgent:
             "evidence_coverage": coverage,
             "conflict_detected": bool(audit.get("conflict_detected", base.get("conflict_detected", False))),
             "suggested_retry_query": _clean_str(audit.get("suggested_retry_query") or base.get("suggested_retry_query")),
+            "usable_evidence_ids": _clean_list(audit.get("usable_evidence_ids") or base.get("usable_evidence_ids")),
             "reason": _clean_str(audit.get("reason") or base.get("reason") or "Evidence audit completed."),
             "source": _clean_str(audit.get("source") or base.get("source") or "evidence_audit_agent"),
         }
@@ -1014,19 +1014,20 @@ def merge_audit_and_rule_gate(rule_gate: Mapping[str, Any], audit: Mapping[str, 
     if rule_decision not in DECISION_RANK:
         rule_decision = "refuse"
     audit_decision = audit_payload["semantic_decision"]
-    final_decision = rule_decision
-    if DECISION_RANK[audit_decision] > DECISION_RANK[rule_decision]:
-        final_decision = audit_decision
+    rule_reason = str(rule.get("reason") or "").strip()
+    final_decision = rule_decision if rule_reason in HARD_RULE_REASONS else audit_decision
 
     merged = dict(rule)
     merged["decision"] = final_decision
     merged["rule_decision"] = rule_decision
     merged["semantic_decision"] = audit_decision
     merged["evidence_audit"] = audit_payload
-    if final_decision != rule_decision:
+    if rule_reason in HARD_RULE_REASONS:
+        merged["reason"] = rule.get("reason") or final_decision
+    elif final_decision != rule_decision:
         merged["reason"] = audit_payload.get("reason") or f"semantic_{audit_decision}"
     else:
-        merged.setdefault("reason", rule.get("reason") or audit_payload.get("reason") or final_decision)
+        merged["reason"] = audit_payload.get("reason") or rule.get("reason") or final_decision
     if audit_payload.get("suggested_retry_query"):
         merged["suggested_retry_query"] = audit_payload["suggested_retry_query"]
     if audit_payload.get("missing_aspects"):

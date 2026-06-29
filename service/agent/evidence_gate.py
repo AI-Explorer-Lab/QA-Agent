@@ -6,14 +6,19 @@ from service.agent.controlled_agents import EvidenceAuditAgent, merge_audit_and_
 
 
 def _score(row: Dict[str, Any]) -> float:
+    score, _source = _score_with_source(row)
+    return score
+
+
+def _score_with_source(row: Dict[str, Any]) -> tuple[float, str]:
     for key in ("light_final_score", "confidence_score", "final_score", "score", "dense_score", "bm25_score"):
         if key not in row:
             continue
         try:
-            return max(0.0, min(1.0, float(row.get(key))))
+            return max(0.0, min(1.0, float(row.get(key)))), key
         except Exception:
             continue
-    return 0.0
+    return 0.0, ""
 
 
 def _confidence(rows: List[Dict[str, Any]]) -> float:
@@ -23,6 +28,30 @@ def _confidence(rows: List[Dict[str, Any]]) -> float:
     top = max(values) if values else 0.0
     avg = sum(values) / max(1, len(values))
     return round(max(0.0, min(1.0, (top + avg) / 2.0)), 4)
+
+
+def _score_diagnostics(
+    rows: List[Dict[str, Any]],
+    *,
+    min_top_score: float,
+    min_avg_score: float,
+) -> Dict[str, Any]:
+    score_pairs = [_score_with_source(row) for row in rows]
+    scores = [score for score, _source in score_pairs]
+    top_score = max(scores) if scores else 0.0
+    avg_score = sum(scores) / max(1, len(scores))
+    top_source = ""
+    if score_pairs:
+        _score_value, top_source = max(score_pairs, key=lambda item: item[0])
+    diagnostics: Dict[str, Any] = {
+        "top_score": round(top_score, 4),
+        "avg_score": round(avg_score, 4),
+        "score_source": top_source,
+        "score_warning": "",
+    }
+    if top_score < min_top_score or avg_score < min_avg_score:
+        diagnostics["score_warning"] = "low_score"
+    return diagnostics
 
 
 class EvidenceGate:
@@ -58,76 +87,39 @@ class EvidenceGate:
                 "confidence": 0.0,
             }
 
-        scores = [_score(row) for row in rows]
-        top_score = max(scores) if scores else 0.0
-        avg_score = sum(scores) / max(1, len(scores))
+        diagnostics = _score_diagnostics(
+            rows,
+            min_top_score=self.evidence_min_top_score,
+            min_avg_score=self.evidence_min_avg_score,
+        )
         docs = {
             str(row.get("doc_id") or row.get("doc_source") or "")
             for row in rows
             if row.get("doc_id") or row.get("doc_source")
         }
         table_count = sum(1 for row in rows if str(row.get("chunk_type") or "") == "table")
+        diagnostics.update(
+            {
+                "doc_count": len(docs),
+                "table_evidence_count": table_count,
+                "coverage_warnings": [],
+            }
+        )
 
         if query_type == "table_qa" and table_count < max(1, int(table_evidence_quota)):
-            if retry_count < self.retry_limit:
-                return {
-                    "decision": "retry",
-                    "reason": "missing_table_evidence",
-                    "confidence": _confidence(rows),
-                }
-            return {
-                "decision": "refuse",
-                "reason": "missing_table_evidence_after_retry",
-                "confidence": _confidence(rows),
-            }
+            diagnostics["coverage_warnings"].append("missing_table_evidence")
 
         if query_type == "multi_doc_compare" and len(docs) < 2:
-            if retry_count < self.retry_limit:
-                return {
-                    "decision": "retry",
-                    "reason": "multi_doc_evidence_missing",
-                    "confidence": _confidence(rows),
-                }
-            return {
-                "decision": "refuse",
-                "reason": "multi_doc_evidence_missing_after_retry",
-                "confidence": _confidence(rows),
-            }
+            diagnostics["coverage_warnings"].append("multi_doc_evidence_missing")
 
         coverage_sensitive_types = {"summarization", "report_generation", "multi_doc_compare"}
         if query_type in coverage_sensitive_types and len(rows) < self.evidence_min_docs:
-            if retry_count < self.retry_limit:
-                return {
-                    "decision": "retry",
-                    "reason": "insufficient_doc_coverage",
-                    "confidence": _confidence(rows),
-                }
-            return {
-                "decision": "refuse",
-                "reason": "insufficient_doc_coverage_after_retry",
-                "confidence": _confidence(rows),
-            }
-
-        if top_score < self.evidence_min_top_score or avg_score < self.evidence_min_avg_score:
-            if retry_count < self.retry_limit:
-                return {
-                    "decision": "retry",
-                    "reason": "low_score_retry",
-                    "confidence": _confidence(rows),
-                }
-            return {
-                "decision": "refuse" if self.refuse_on_low_evidence else "answer",
-                "reason": "low_score",
-                "confidence": _confidence(rows),
-            }
+            diagnostics["coverage_warnings"].append("insufficient_doc_coverage")
 
         return {
             "decision": "answer",
-            "reason": "evidence_passed",
-            "top_score": round(top_score, 4),
-            "avg_score": round(avg_score, 4),
-            "doc_count": len(docs),
-            "table_evidence_count": table_count,
+            "reason": "evidence_available",
+            **diagnostics,
             "confidence": _confidence(rows),
         }
 
@@ -171,14 +163,24 @@ class EvidenceDecisionEngine:
             table_evidence_quota=table_evidence_quota,
             slots=dict(slots or {}),
         )
-        rule_audit = self.evidence_agent._rule_audit(
-            question=question,
-            query_type=query_type,
-            slots=slots,
-            selected_skill=selected_skill,
-            evidence=rows,
-            rerank_trace=rerank_trace,
-        )
+        if str(rule_gate.get("reason") or "") in {"no_evidence", "no_evidence_after_retry"}:
+            rule_audit = self.evidence_agent._rule_audit(
+                question=question,
+                query_type=query_type,
+                slots=slots,
+                selected_skill=selected_skill,
+                evidence=rows,
+                rerank_trace=rerank_trace,
+            )
+        else:
+            rule_audit = await self.evidence_agent.audit(
+                question=question,
+                query_type=query_type,
+                slots=slots,
+                selected_skill=selected_skill,
+                evidence=rows,
+                rerank_trace=rerank_trace,
+            )
         merged = merge_audit_and_rule_gate(rule_gate, rule_audit)
         merged["rule_gate"] = rule_gate
         merged["evidence_audit"] = rule_audit

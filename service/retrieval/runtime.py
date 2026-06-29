@@ -18,6 +18,11 @@ def _configured_embedding_dim(config: Mapping[str, Any]) -> int:
     return int(pgvector.get("embedding_dim") or 1024)
 
 
+def _configured_sparse_scan_limit(config: Mapping[str, Any]) -> int:
+    retrieval = config.get("retrieval", {}) if isinstance(config.get("retrieval"), Mapping) else {}
+    return max(200, int(retrieval.get("hybrid_sparse_scan_limit") or 3000))
+
+
 def _build_runtime_repository() -> PgvectorRepository:
     config = get_app_config()
     backend = get_storage_backend(config).strip().lower() or "pgvector"
@@ -31,6 +36,7 @@ def _build_runtime_repository() -> PgvectorRepository:
         backend=backend,
         database_url=database_url,
         embedding_dim=_configured_embedding_dim(config),
+        sparse_scan_limit=_configured_sparse_scan_limit(config),
     )
 
 

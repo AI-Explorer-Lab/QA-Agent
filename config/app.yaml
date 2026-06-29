@@ -144,7 +144,7 @@ reranker:
   near_duplicate_threshold: 0.9
   cross_encoder_enabled: true
   cross_encoder_model: BAAI/bge-reranker-base
-  cross_encoder_candidate_pool: 20
+  cross_encoder_candidate_pool: 40
   cross_encoder_batch_size: 8
   cross_encoder_max_length: 512
   cross_encoder_local_files_only: false
