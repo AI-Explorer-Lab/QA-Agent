@@ -271,6 +271,68 @@ class LLMService:
             or ("direct" if provider_name.lower() == "rightcode" else "sdk")
         ).strip().lower()
         self.use_responses_api = bool(llm_cfg.get("use_responses_api", provider_cfg.get("use_responses_api", False)))
+        self.default_max_tokens = max(
+            1,
+            _safe_int(
+                os.getenv("TRUSTED_QA_LLM_MAX_TOKENS")
+                or model_cfg.get("max_tokens")
+                or provider_cfg.get("max_tokens")
+                or llm_cfg.get("max_tokens")
+                or 2048,
+                2048,
+            ),
+        )
+        self.answer_max_tokens = max(
+            1,
+            _safe_int(
+                os.getenv("TRUSTED_QA_LLM_ANSWER_MAX_TOKENS")
+                or model_cfg.get("answer_max_tokens")
+                or provider_cfg.get("answer_max_tokens")
+                or llm_cfg.get("answer_max_tokens")
+                or self.default_max_tokens,
+                self.default_max_tokens,
+            ),
+        )
+        self.summary_max_tokens = max(
+            self.answer_max_tokens,
+            _safe_int(
+                os.getenv("TRUSTED_QA_LLM_SUMMARY_MAX_TOKENS")
+                or model_cfg.get("summary_max_tokens")
+                or provider_cfg.get("summary_max_tokens")
+                or llm_cfg.get("summary_max_tokens")
+                or self.answer_max_tokens,
+                self.answer_max_tokens,
+            ),
+        )
+        self.report_max_tokens = max(
+            self.summary_max_tokens,
+            _safe_int(
+                os.getenv("TRUSTED_QA_LLM_REPORT_MAX_TOKENS")
+                or model_cfg.get("report_max_tokens")
+                or provider_cfg.get("report_max_tokens")
+                or llm_cfg.get("report_max_tokens")
+                or self.summary_max_tokens,
+                self.summary_max_tokens,
+            ),
+        )
+        thinking_cfg = llm_cfg.get("thinking", {})
+        if not isinstance(thinking_cfg, dict):
+            thinking_cfg = {}
+        provider_thinking_cfg = provider_cfg.get("thinking", {})
+        if not isinstance(provider_thinking_cfg, dict):
+            provider_thinking_cfg = {}
+        model_thinking_cfg = model_cfg.get("thinking", {})
+        if not isinstance(model_thinking_cfg, dict):
+            model_thinking_cfg = {}
+        configured_thinking_type = (
+            os.getenv("TRUSTED_QA_LLM_THINKING_TYPE")
+            or model_thinking_cfg.get("type")
+            or provider_thinking_cfg.get("type")
+            or thinking_cfg.get("type")
+            or llm_cfg.get("thinking_type")
+            or "disabled"
+        )
+        self.thinking_type = str(configured_thinking_type or "disabled").strip().lower()
 
         yaml_api_key = str(llm_cfg.get("api_key") or "").strip()
         provider_api_key = str(provider_cfg.get("api_key") or "").strip()
@@ -305,6 +367,8 @@ class LLMService:
         self._langchain_client = None
         self.last_error = ""
         self.last_call_mode = ""
+        self.last_finish_reason = ""
+        self.last_requested_max_tokens = 0
         self.call_attempt_count = 0
 
     def _install_proxy(self, provider_cfg: Dict[str, Any]) -> None:
@@ -340,11 +404,33 @@ class LLMService:
             "use_responses_api": self.use_responses_api,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
+            "max_tokens": self.default_max_tokens,
+            "answer_max_tokens": self.answer_max_tokens,
+            "summary_max_tokens": self.summary_max_tokens,
+            "report_max_tokens": self.report_max_tokens,
+            "thinking_type": self.thinking_type,
             "langchain_available": self.langchain_available,
             "call_attempt_count": self.call_attempt_count,
             "last_call_mode": self.last_call_mode,
+            "last_finish_reason": self.last_finish_reason,
+            "last_requested_max_tokens": self.last_requested_max_tokens,
             "last_error": self.last_error,
         }
+
+    def _thinking_extra_body(self) -> Dict[str, Any]:
+        if self.provider_name.lower() != "deepseek":
+            return {}
+        if self.thinking_type not in {"enabled", "disabled"}:
+            return {}
+        return {"thinking": {"type": self.thinking_type}}
+
+    def _grounded_answer_max_tokens(self, query_type: str) -> int:
+        normalized = str(query_type or "").strip()
+        if normalized == "report_generation":
+            return self.report_max_tokens
+        if normalized == "summarization":
+            return self.summary_max_tokens
+        return self.answer_max_tokens
 
     def _client_instance(self):
         if not self.is_available:
@@ -398,6 +484,8 @@ class LLMService:
         self.call_attempt_count += 1
         self.last_call_mode = "direct.chat.completions"
         self.last_error = ""
+        self.last_finish_reason = ""
+        self.last_requested_max_tokens = max_tokens
 
         url = self.base_url.rstrip("/") + "/chat/completions"
         payload = {
@@ -409,6 +497,7 @@ class LLMService:
             "temperature": self.temperature,
             "max_tokens": max_tokens,
         }
+        payload.update(self._thinking_extra_body())
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -423,6 +512,8 @@ class LLMService:
             if not choices:
                 self.last_error = "direct chat.completions returned no choices"
                 return None
+            if isinstance(choices[0], dict):
+                self.last_finish_reason = str(choices[0].get("finish_reason") or "")
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             content = message.get("content") if isinstance(message, dict) else ""
             if isinstance(content, list):
@@ -511,6 +602,8 @@ class LLMService:
 
         self.call_attempt_count += 1
         self.last_error = ""
+        self.last_finish_reason = ""
+        self.last_requested_max_tokens = max_tokens
         errors: List[str] = []
 
         if self.use_responses_api and hasattr(client, "responses"):
@@ -534,6 +627,10 @@ class LLMService:
 
         try:
             self.last_call_mode = "chat.completions"
+            extra_body = self._thinking_extra_body()
+            request_kwargs: Dict[str, Any] = {}
+            if extra_body:
+                request_kwargs["extra_body"] = extra_body
             response = await client.chat.completions.create(
                 model=str(model_override or self.model),
                 messages=[
@@ -542,8 +639,10 @@ class LLMService:
                 ],
                 temperature=self.temperature,
                 max_tokens=max_tokens,
+                **request_kwargs,
             )
             if response.choices:
+                self.last_finish_reason = str(getattr(response.choices[0], "finish_reason", "") or "")
                 text = response.choices[0].message.content or ""
                 if text.strip():
                     self.last_error = ""
@@ -637,7 +736,11 @@ class LLMService:
             "Evidence:\n" + "\n".join(evidence_lines) + "\n"
             "Write the final answer in Chinese. Do not simply list evidence snippets; synthesize them into the requested structure."
         )
-        answer = await self.complete(system_prompt, user_prompt, max_tokens=1600)
+        answer = await self.complete(
+            system_prompt,
+            user_prompt,
+            max_tokens=self._grounded_answer_max_tokens(query_type),
+        )
         if not answer or not answer.strip():
             return None
         return answer.strip()

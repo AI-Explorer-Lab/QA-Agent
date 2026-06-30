@@ -298,9 +298,10 @@ class SessionService:
             "retrieval_traces": traces,
         }
 
-    async def list_sessions(self, collection_name: str = "default", limit: int = 30) -> Dict[str, Any]:
+    async def list_sessions(self, collection_name: str = "default", limit: int = 30, offset: int = 0) -> Dict[str, Any]:
         cname = _clean_str(collection_name) or "default"
         safe_limit = max(1, min(int(limit or 30), 100))
+        safe_offset = max(0, int(offset or 0))
         async with get_async_session(backend=self.backend) as db_session:
             rows = (
                 await db_session.execute(
@@ -363,12 +364,15 @@ class SessionService:
                     WHERE s.collection_name = :collection_name
                     ORDER BY s.updated_at DESC, s.session_id DESC
                     LIMIT :limit
+                    OFFSET :offset
                     """
                 ),
-                {"collection_name": cname, "limit": safe_limit},
+                {"collection_name": cname, "limit": safe_limit + 1, "offset": safe_offset},
                 )
             ).mappings().all()
 
+        has_more = len(rows) > safe_limit
+        rows = rows[:safe_limit]
         sessions: List[Dict[str, Any]] = []
         for row in rows:
             session_metadata = _json_loads(row.get("metadata_json"), {})
@@ -415,7 +419,14 @@ class SessionService:
                     ),
                 }
             )
-        return {"collection_name": cname, "sessions": sessions}
+        return {
+            "collection_name": cname,
+            "sessions": sessions,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "has_more": has_more,
+            "next_offset": safe_offset + len(sessions) if has_more else None,
+        }
 
     async def delete_session(self, session_id: str) -> Dict[str, Any]:
         sid = _clean_str(session_id)

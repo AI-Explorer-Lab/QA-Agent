@@ -18,9 +18,14 @@ llm:
   api_key_env: DEEPSEEK_API_KEY
   base_url_env: DEEPSEEK_BASE_URL
   temperature: 0.2
-  max_tokens: 2048
+  max_tokens: 4096
+  answer_max_tokens: 4096
+  summary_max_tokens: 8192
+  report_max_tokens: 12000
+  thinking:
+    type: disabled
   enable_real_generation: true
-  timeout_seconds: 35
+  timeout_seconds: 90
   max_retries: 0
   client_mode: direct
   providers:
